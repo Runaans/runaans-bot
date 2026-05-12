@@ -1,0 +1,11 @@
+.env
+*.env
+
+tidal-mote-493102-a0-de7431459f0c.json
+*.json
+
+__pycache__/
+*.pyc
+*.pyo
+
+.vscode/
