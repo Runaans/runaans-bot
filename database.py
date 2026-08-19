@@ -1,13 +1,28 @@
 import logging
 
 from pymongo import MongoClient
+from pymongo.errors import ConfigurationError
 from config import MONGO_URI, DB_NAME
 
 log = logging.getLogger("runaans.database")
 
-# Fail fast instead of blocking a worker thread (and the sync lock behind it)
-# for the default 30s when Mongo is unreachable.
-mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+# A mongodb+srv:// URI is resolved via DNS right here, at construction, so a
+# deleted or renamed Atlas cluster fails on import with a pymongo traceback.
+# Translate it into something that says what to actually do about it.
+try:
+    # Fail fast instead of blocking a worker thread (and the sync lock behind
+    # it) for the default 30s when Mongo is unreachable.
+    mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+except ConfigurationError as e:
+    host = MONGO_URI.split("@")[-1].split("/")[0]
+    raise RuntimeError(
+        f"Could not resolve the MongoDB host '{host}' from MONGO_URI.\n"
+        "The cluster was most likely deleted or renamed - an idle Atlas free "
+        "cluster gets paused and can eventually be removed.\n"
+        "Check the cluster in MongoDB Atlas and update MONGO_URI in .env.\n"
+        f"(underlying error: {e})"
+    ) from e
+
 db = mongo[DB_NAME]
 plays_col = db["plays"]
 
