@@ -22,7 +22,7 @@ log = logging.getLogger("runaans")
 intents = discord.Intents.default()
 intents.guilds = True
 
-COGS = ["cogs.recap", "cogs.sync"]
+COGS = ["cogs.recap", "cogs.sync", "cogs.stats"]
 
 class Client(commands.Bot):
     def __init__(self):
@@ -42,6 +42,15 @@ class Client(commands.Bot):
 
     async def on_ready(self):
         log.info("Logged in as %s (%s)", self.user, self.user.id)
+
+        try:
+            await self.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.watching, name="the board 📈"
+                )
+            )
+        except discord.HTTPException:
+            log.warning("Could not set presence", exc_info=True)
 
 client = Client()
 

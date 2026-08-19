@@ -24,10 +24,16 @@ def main():
         return
 
     if "--yes" not in sys.argv:
-        answer = input(
-            f"This will permanently delete {count} imported plays "
-            f"from '{DB_NAME}'. Type 'yes' to continue: "
-        )
+        try:
+            answer = input(
+                f"This will permanently delete {count} imported plays "
+                f"from '{DB_NAME}'. Type 'yes' to continue: "
+            )
+        except (EOFError, KeyboardInterrupt):
+            # No interactive stdin (scheduler, piped input) - never assume yes
+            print("\nAborted (no confirmation received). Pass --yes to skip the prompt.")
+            return
+
         if answer.strip().lower() != "yes":
             print("Aborted.")
             return

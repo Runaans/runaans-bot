@@ -5,7 +5,8 @@ anywhere (bot, CLI scripts, tests) without side effects.
 """
 
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import gspread
@@ -17,6 +18,12 @@ from database import plays_col
 from helpers import normalize_date, parse_units
 
 log = logging.getLogger("runaans.sync")
+
+# Only one sync at a time (/sync, /recap and the background loop can overlap)
+_sync_lock = threading.Lock()
+
+# Result of the most recent sync attempt, for /status
+last_sync = {"time": None, "stats": None, "error": None}
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -43,12 +50,25 @@ class SyncStats:
     inserted: int = 0
     updated: int = 0
     deleted: int = 0
+    # Sheet rows that had a selection but an unreadable date, so they were
+    # dropped. Surfaced to the owner so plays don't vanish silently.
+    bad_date_rows: list = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
+        text = (
             f"{self.parsed} rows parsed, {self.inserted} new, "
             f"{self.updated} updated, {self.deleted} removed"
         )
+
+        if self.bad_date_rows:
+            shown = ", ".join(str(r) for r in self.bad_date_rows[:5])
+            more = "…" if len(self.bad_date_rows) > 5 else ""
+            text += (
+                f"\n⚠️ {len(self.bad_date_rows)} row(s) skipped for an "
+                f"unreadable date: {shown}{more}"
+            )
+
+        return text
 
 
 # Whether it's a win, loss, push, pending
@@ -78,8 +98,25 @@ def sync_sheet() -> SyncStats:
     """Pull all rows from the sheet and mirror them into MongoDB.
 
     Rows that disappeared from the sheet are deleted from MongoDB so the
-    database always matches the sheet exactly.
+    database always matches the sheet exactly. Concurrent calls are
+    serialized; each caller still gets a fresh sync.
     """
+    with _sync_lock:
+        try:
+            stats = _do_sync()
+        except Exception as e:
+            last_sync.update(
+                time=datetime.now(timezone.utc), stats=None, error=str(e)
+            )
+            raise
+
+        last_sync.update(
+            time=datetime.now(timezone.utc), stats=stats, error=None
+        )
+        return stats
+
+
+def _do_sync() -> SyncStats:
     stats = SyncStats()
 
     sheet = _get_client().open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
@@ -105,8 +142,14 @@ def sync_sheet() -> SyncStats:
 
         date_str = normalize_date(date_raw)
 
+        # A real play with a date we can't read: don't drop it silently
         if not date_str:
             stats.skipped += 1
+            stats.bad_date_rows.append(sheet_row)
+            log.warning(
+                "Row %s skipped: unreadable date %r (selection %r)",
+                sheet_row, date_raw, selection,
+            )
             continue
 
         stake = parse_units(stake_raw)
@@ -165,13 +208,18 @@ def sync_sheet() -> SyncStats:
     stats.inserted = result.upserted_count
     stats.updated = result.modified_count
 
-    # Remove rows that no longer exist in the sheet (deleted/cleared/moved)
+    # Remove anything that isn't a live row of the current sheet: rows that
+    # were deleted/cleared/moved, plus leftovers from an older SHEET_NAME or
+    # SPREADSHEET_ID. Without the last two clauses, renaming the sheet tab
+    # would strand the old documents and double every recap total forever.
     delete_result = plays_col.delete_many(
         {
             "source": "sheet",
-            "spreadsheet_id": SPREADSHEET_ID,
-            "sheet_name": SHEET_NAME,
-            "sheet_row": {"$nin": seen_rows},
+            "$or": [
+                {"spreadsheet_id": {"$ne": SPREADSHEET_ID}},
+                {"sheet_name": {"$ne": SHEET_NAME}},
+                {"sheet_row": {"$nin": seen_rows}},
+            ],
         }
     )
     stats.deleted = delete_result.deleted_count

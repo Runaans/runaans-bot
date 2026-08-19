@@ -31,10 +31,6 @@ SPREADSHEET_ID = get_required_env("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "TOKEN PICKS")
 DB_NAME = os.getenv("DB_NAME", "runaanslocks")
 
-# First data row of the sheet (1-based, rows above are headers/summary)
-SHEET_DATA_START_ROW = int(os.getenv("SHEET_DATA_START_ROW", "12"))
-
-
 def _get_int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -63,6 +59,11 @@ def _get_time_env(name: str, default: str):
         hour, minute = default.split(":")
         return dtime(hour=int(hour), minute=int(minute), tzinfo=EASTERN)
 
+
+# First data row of the sheet (1-based, rows above are headers/summary).
+# Floored at 1: a value of 0 would slice the sheet down to a single row and
+# make the sync treat every other play as deleted.
+SHEET_DATA_START_ROW = max(1, _get_int_env("SHEET_DATA_START_ROW", 12))
 
 # Background sheet -> MongoDB sync interval in minutes (0 disables it)
 AUTO_SYNC_MINUTES = _get_int_env("AUTO_SYNC_MINUTES", 15)

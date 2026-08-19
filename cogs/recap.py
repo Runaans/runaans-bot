@@ -1,6 +1,7 @@
 # imports
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 import discord
@@ -38,7 +39,9 @@ def clean_result(value):
 
 ## Formats unit totals
 def fmt(value):
-    return f"+{value:.2f}u" if value >= 0 else f"{value:.2f}u"
+    # `+ 0.0` collapses -0.0 to 0.0, which would otherwise render "+-0.00u"
+    value = value + 0.0
+    return f"{value:+.2f}u"
 
 
 # Calculates Monthly, Yearly, All-time totals (blocking - run in a thread)
@@ -89,6 +92,24 @@ def sum_profit(extra_query=None):
 
     result = list(plays_col.aggregate(pipeline))
     return result[0]["total"] if result else 0.0
+
+
+# Recent dates that actually have plays, for /recap autocomplete
+# (blocking - run in a thread)
+def recent_dates(prefix: str = "") -> list[tuple[str, int]]:
+    match = {"$and": [SOURCE_FILTER, {"title": {"$ne": "Untitled"}}]}
+
+    if prefix:
+        match["$and"].append({"date": {"$regex": f"^{re.escape(prefix)}"}})
+
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": "$date", "plays": {"$sum": 1}}},
+        {"$sort": {"_id": -1}},
+        {"$limit": 25},
+    ]
+
+    return [(doc["_id"], doc["plays"]) for doc in plays_col.aggregate(pipeline)]
 
 
 # Gathers everything a recap needs from MongoDB (blocking - run in a thread)
@@ -163,13 +184,21 @@ def build_recap_embed(data: dict) -> discord.Embed:
     plays_text = "\n".join(rows) if rows else "No settled plays."
 
     if len(plays_text) > DESCRIPTION_LIMIT:
+        budget = DESCRIPTION_LIMIT - 40
         kept = []
         used = 0
+
         for line in rows:
-            if used + len(line) + 1 > DESCRIPTION_LIMIT - 40:
+            # Hard-trim a single monster line so it can't swallow the budget
+            if len(line) > budget:
+                line = line[: budget - 1] + "…"
+
+            if used + len(line) + 1 > budget:
                 break
+
             kept.append(line)
             used += len(line) + 1
+
         plays_text = "\n".join(kept) + f"\n… and {len(rows) - len(kept)} more plays"
 
     # Daily record, e.g. 3-2 or 3-2-1 when there are pushes
@@ -235,12 +264,30 @@ class RecapCog(commands.Cog):
 
         return channel
 
+    # Suggests dates that actually have plays, newest first
+    async def date_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            dates = await asyncio.to_thread(recent_dates, current.strip())
+        except Exception:
+            log.exception("Date autocomplete failed")
+            return []
+
+        return [
+            app_commands.Choice(
+                name=f"{d} ({n} play{'s' if n != 1 else ''})", value=d
+            )
+            for d, n in dates
+        ]
+
     @app_commands.command(name="recap", description="Post the Recaps")
     @owner_only()
     @app_commands.describe(
         date="Date of the recap (e.g. 2026-08-19 or 8/19/2026), leave blank for today",
         preview="Show the recap only to you instead of posting it",
     )
+    @app_commands.autocomplete(date=date_autocomplete)
     async def recap(
         self,
         interaction: discord.Interaction,
