@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import sys
 
@@ -11,12 +13,16 @@ from discord.ext import commands
 from discord import app_commands
 
 from config import TOKEN, GUILD_ID
+from database import ensure_indexes
 from helpers import OwnerOnly
+
+discord.utils.setup_logging(level=logging.INFO)
+log = logging.getLogger("runaans")
 
 intents = discord.Intents.default()
 intents.guilds = True
 
-COGS = ["cogs.recap",]
+COGS = ["cogs.recap", "cogs.sync"]
 
 class Client(commands.Bot):
     def __init__(self):
@@ -24,26 +30,37 @@ class Client(commands.Bot):
 
 
     async def setup_hook(self):
+        await asyncio.to_thread(ensure_indexes)
+
         # Load all cogs
         for cog in COGS:
             await self.load_extension(cog)
-            print(f"Loaded {cog}")
+            log.info("Loaded %s", cog)
 
         await self.tree.sync(guild=GUILD_ID)
-        print(f"Synced commands to guild {GUILD_ID.id}")
+        log.info("Synced commands to guild %s", GUILD_ID.id)
+
+    async def on_ready(self):
+        log.info("Logged in as %s (%s)", self.user, self.user.id)
 
 client = Client()
 
-# Handle owner-only errors 
+# Handle command errors
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, OwnerOnly):
-        try:
-            await interaction.response.send_message("\u200b", ephemeral=True)
-        except Exception:
-            pass
+        message = "You don't have permission to use this command."
     else:
-        print(f"Command error: {error}")
+        log.error("Command error in /%s", interaction.command.name if interaction.command else "?", exc_info=error)
+        message = "Something went wrong running that command."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
-client.run(TOKEN)
+client.run(TOKEN, log_handler=None)

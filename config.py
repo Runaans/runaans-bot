@@ -30,3 +30,43 @@ CREDENTIALS_FILE = get_required_env("GOOGLE_CREDENTIALS_FILE")
 SPREADSHEET_ID = get_required_env("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "TOKEN PICKS")
 DB_NAME = os.getenv("DB_NAME", "runaanslocks")
+
+# First data row of the sheet (1-based, rows above are headers/summary)
+SHEET_DATA_START_ROW = int(os.getenv("SHEET_DATA_START_ROW", "12"))
+
+
+def _get_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_time_env(name: str, default: str):
+    from datetime import time as dtime
+
+    raw = os.getenv(name, default).strip()
+
+    try:
+        hour, minute = raw.split(":")
+        return dtime(hour=int(hour), minute=int(minute), tzinfo=EASTERN)
+    except (ValueError, AttributeError):
+        hour, minute = default.split(":")
+        return dtime(hour=int(hour), minute=int(minute), tzinfo=EASTERN)
+
+
+# Background sheet -> MongoDB sync interval in minutes (0 disables it)
+AUTO_SYNC_MINUTES = _get_int_env("AUTO_SYNC_MINUTES", 15)
+
+# Automatic daily recap post (off by default so nothing posts unexpectedly)
+AUTO_RECAP_ENABLED = _get_bool_env("AUTO_RECAP_ENABLED", False)
+AUTO_RECAP_TIME = _get_time_env("AUTO_RECAP_TIME", "23:00")

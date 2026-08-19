@@ -1,203 +1,334 @@
 # imports
-import discord
-from discord.ext import commands
-from discord import app_commands
+import asyncio
+import logging
 from datetime import datetime
 
-from config import GUILD_ID, RECAP_CHANNEL, PURPLE, EASTERN
-from database import plays_col
-from helpers import owner_only
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
 
+from config import (
+    GUILD_ID,
+    RECAP_CHANNEL,
+    PURPLE,
+    GREEN,
+    RED,
+    EASTERN,
+    AUTO_RECAP_ENABLED,
+    AUTO_RECAP_TIME,
+)
+from database import plays_col
+from helpers import owner_only, normalize_date, parse_units
+from sheets_sync import sync_sheet
+
+log = logging.getLogger("runaans.recap")
 
 VALID_RESULTS = {"W", "L", "P"}
 
 # Makes sure recaps only come from the google sheet
 SOURCE_FILTER = {"source": "sheet"}
 
+# Discord embed limits
+DESCRIPTION_LIMIT = 4096
+
+
 def clean_result(value):
     return (value or "").upper().strip()
 
-# Converts value into a number
-def as_float(value):
-    try:
-        if value is None or value == "":
-            return 0.0
-
-        return float(
-            str(value)
-            .replace(",", "")
-            .replace("u", "")
-            .strip()
-        )
-    except (ValueError, TypeError):
-        return 0.0
 
 ## Formats unit totals
 def fmt(value):
     return f"+{value:.2f}u" if value >= 0 else f"{value:.2f}u"
+
+
+# Calculates Monthly, Yearly, All-time totals (blocking - run in a thread)
+def sum_profit(extra_query=None):
+    extra_query = extra_query or {}
+
+    # MongoDB aggregation pipeline
+    pipeline = [
+        # Filter Records
+        {
+            "$match": {
+                "$and": [
+                    SOURCE_FILTER,
+                    {"title": {"$ne": "Untitled"}},
+                    extra_query,
+                ]
+            }
+        },
+        {
+            "$addFields": {
+                "resultUpper": {
+                    "$toUpper": {
+                        "$ifNull": ["$result", ""]
+                    }
+                },
+                "profitNum": {
+                    "$convert": {
+                        "input": "$profit",
+                        "to": "double",
+                        "onError": 0,
+                        "onNull": 0,
+                    }
+                }
+            }
+        },
+        {
+            "$match": {
+                "resultUpper": {"$in": ["W", "L", "P"]}
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "total": {"$sum": "$profitNum"}
+            }
+        }
+    ]
+
+    result = list(plays_col.aggregate(pipeline))
+    return result[0]["total"] if result else 0.0
+
+
+# Gathers everything a recap needs from MongoDB (blocking - run in a thread)
+def gather_recap_data(target_date: str) -> dict | None:
+    day_query = {
+        "$and": [
+            SOURCE_FILTER,
+            {"date": target_date},
+            {"title": {"$ne": "Untitled"}},
+        ]
+    }
+
+    day_plays = list(plays_col.find(
+        day_query,
+        sort=[("timestamp", 1), ("sheet_row", 1)]
+    ))
+
+    if not day_plays:
+        return None
+
+    month_str = target_date[:7]
+    year_str = target_date[:4]
+
+    return {
+        "target_date": target_date,
+        "day_plays": day_plays,
+        "month_total": sum_profit({"date": {"$regex": f"^{month_str}"}}),
+        "yearly_total": sum_profit({"date": {"$regex": f"^{year_str}"}}),
+        "alltime_total": sum_profit({}),
+    }
+
+
+# Builds the recap embed from gathered data
+def build_recap_embed(data: dict) -> discord.Embed:
+    target_date = data["target_date"]
+
+    total_profit = 0.0
+    wins = losses = pushes = pending = 0
+    rows = []
+
+    # Loop through each play
+    for p in data["day_plays"]:
+        title = p.get("title", "Untitled")
+        result = clean_result(p.get("result"))
+        profit = parse_units(p.get("profit")) or 0.0
+
+        # If invalid result, it is pending
+        if result not in VALID_RESULTS:
+            pending += 1
+            rows.append(f"⏳ {title}")
+            continue
+
+        # Adds the play's profit to daily total
+        total_profit += profit
+        profit_str = fmt(profit)
+
+        if result == "W":
+            wins += 1
+            rows.append(f"✅ {title} {profit_str}")
+        elif result == "L":
+            losses += 1
+            rows.append(f"❌ {title} {profit_str}")
+        else:
+            pushes += 1
+            rows.append(f"➖ {title} {profit_str}")
+
+    # Date Formatting
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    pretty_date = f"{dt.month}/{dt.day}/{dt.year}"
+
+    # Combine plays, staying under Discord's description limit
+    plays_text = "\n".join(rows) if rows else "No settled plays."
+
+    if len(plays_text) > DESCRIPTION_LIMIT:
+        kept = []
+        used = 0
+        for line in rows:
+            if used + len(line) + 1 > DESCRIPTION_LIMIT - 40:
+                break
+            kept.append(line)
+            used += len(line) + 1
+        plays_text = "\n".join(kept) + f"\n… and {len(rows) - len(kept)} more plays"
+
+    # Daily record, e.g. 3-2 or 3-2-1 when there are pushes
+    record = f"{wins}-{losses}"
+    if pushes:
+        record += f"-{pushes}"
+
+    day_line = f"**{pretty_date}: {fmt(total_profit)} ({record})**"
+    if pending:
+        day_line += f"\n⏳ {pending} pending"
+
+    # Builds the total section
+    totals_text = (
+        f"{day_line}\n"
+        f"**THIS MONTH: {fmt(data['month_total'])}**\n"
+        f"**YEARLY: {fmt(data['yearly_total'])}**\n"
+        f"**ALL-TIME: {fmt(data['alltime_total'])}**"
+    )
+
+    # Green on a winning day, red on a losing day, purple otherwise
+    settled = wins + losses + pushes
+    if settled and total_profit > 0:
+        color = GREEN
+    elif settled and total_profit < 0:
+        color = RED
+    else:
+        color = PURPLE
+
+    embed = discord.Embed(
+        title=f"RunaansLocks {pretty_date} Recap",
+        description=plays_text,
+        color=color,
+        timestamp=datetime.now(EASTERN),
+    )
+
+    embed.add_field(name="​", value=totals_text, inline=False)
+    embed.set_footer(text="Runaans Locks")
+
+    return embed
+
 
 ## Creates the Discord Cog
 class RecapCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="recap", description="Post the Recaps")
-    @owner_only()
-    @app_commands.describe(
-        date="YYYY-MM-DD format, leave blank for today"
-    )
-    async def recap(
-        self,
-        interaction: discord.Interaction,
-        date: str = None,
-    ):
-        await interaction.response.defer(ephemeral=True)
-
-        target_date = date or datetime.now(EASTERN).strftime("%Y-%m-%d")
-
-        # MongoDB Query filter for the day
-        day_query = {
-            "$and": [
-                SOURCE_FILTER,
-                {"date": target_date},
-                {"title": {"$ne": "Untitled"}},
-            ]
-        }
-
-        # Searches MongoDB
-        day_plays = list(plays_col.find(
-            day_query,
-            sort=[("timestamp", 1), ("sheet_row", 1)]
-        ))
-
-        # If no plays are found, sends a message
-        if not day_plays:
-            await interaction.followup.send(
-                f"No sheet plays found for **{target_date}**.",
-                ephemeral=True
+    async def cog_load(self):
+        if AUTO_RECAP_ENABLED:
+            self.auto_recap.start()
+            log.info(
+                "Auto-recap enabled, posting daily at %s Eastern",
+                AUTO_RECAP_TIME.strftime("%H:%M"),
             )
-            return
 
-        # Recap Counters
-        total_profit = 0.0
-        rows = []
+    async def cog_unload(self):
+        self.auto_recap.cancel()
 
-        # Loop through each play 
-        for p in day_plays:
-            title = p.get("title", "Untitled")
-            result = clean_result(p.get("result"))
-            profit = as_float(p.get("profit"))
-
-            # If invalid result, it is pending
-            if result not in VALID_RESULTS:
-                rows.append(f"⏳ {title}")
-                continue
-            
-            # Adds the play's profit to daily total
-            total_profit += profit
-            profit_str = fmt(profit)
-
-            if result == "W":
-                rows.append(f"✅ {title} {profit_str}")
-            elif result == "L":
-                rows.append(f"❌ {title} {profit_str}")
-            else:
-                rows.append(f"➖ {title} {profit_str}")
-
-        # Date Formatting
-        try:
-            dt = datetime.strptime(target_date, "%Y-%m-%d")
-            pretty_date = f"{dt.month}/{dt.day}/{dt.year}"
-            month_str = target_date[:7]
-            year_str = target_date[:4]
-        # If Date format is invalid
-        except ValueError:
-            dt = datetime.now(EASTERN)
-            pretty_date = target_date
-            month_str = dt.strftime("%Y-%m")
-            year_str = dt.strftime("%Y")
-
-        # Calculates Monthly, Yearly, All-time Total
-        def sum_profit(extra_query=None):
-            extra_query = extra_query or {}
-
-            # MongoDB aggregation pipeline
-            pipeline = [
-                # Filter Records
-                {
-                    "$match": {
-                        "$and": [
-                            SOURCE_FILTER,
-                            {"title": {"$ne": "Untitled"}},
-                            extra_query,
-                        ]
-                    }
-                },
-                {
-                    "$addFields": {
-                        "resultUpper": {
-                            "$toUpper": {
-                                "$ifNull": ["$result", ""]
-                            }
-                        },
-                        "profitNum": {
-                            "$convert": {
-                                "input": "$profit",
-                                "to": "double",
-                                "onError": 0,
-                                "onNull": 0,
-                            }
-                        }
-                    }
-                },
-                {
-                    "$match": {
-                        "resultUpper": {"$in": ["W", "L", "P"]}
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": None,
-                        "total": {"$sum": "$profitNum"}
-                    }
-                }
-            ]
-
-            result = list(plays_col.aggregate(pipeline))
-            return result[0]["total"] if result else 0.0
-
-        month_total = sum_profit({"date": {"$regex": f"^{month_str}"}})
-        yearly_total = sum_profit({"date": {"$regex": f"^{year_str}"}})
-        alltime_total = sum_profit({})
-
-        # Combines all plays into one block
-        plays_text = "\n".join(rows) if rows else "No settled plays."
-
-        # Builds the total section
-        totals_text = (
-            f"**{pretty_date}: {fmt(total_profit)}**\n"
-            f"**THIS MONTH: {fmt(month_total)}**\n"
-            f"**YEARLY: {fmt(yearly_total)}**\n"
-            f"**ALL-TIME: {fmt(alltime_total)}**"
-        )
-
-        embed = discord.Embed(
-            title=f"RunaansLocks {pretty_date} Recap",
-            color=PURPLE,
-            timestamp=datetime.now(EASTERN),
-        )
-
-        embed.add_field(name="\u200b", value=plays_text, inline=False)
-        embed.add_field(name="\u200b", value=totals_text, inline=False)
-        embed.set_footer(text="Runaans Locks")
-
+    async def _get_recap_channel(self):
         channel = self.bot.get_channel(RECAP_CHANNEL)
 
         if channel is None:
             channel = await self.bot.fetch_channel(RECAP_CHANNEL)
 
-        await channel.send(embed=embed)
-        await interaction.followup.send("Posted Recap", ephemeral=True)
+        return channel
+
+    @app_commands.command(name="recap", description="Post the Recaps")
+    @owner_only()
+    @app_commands.describe(
+        date="Date of the recap (e.g. 2026-08-19 or 8/19/2026), leave blank for today",
+        preview="Show the recap only to you instead of posting it",
+    )
+    async def recap(
+        self,
+        interaction: discord.Interaction,
+        date: str | None = None,
+        preview: bool = False,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        if date:
+            target_date = normalize_date(date)
+            if not target_date:
+                await interaction.followup.send(
+                    f"Couldn't understand the date **{date}**. "
+                    "Use a format like `2026-08-19` or `8/19/2026`.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            target_date = datetime.now(EASTERN).strftime("%Y-%m-%d")
+
+        # Pull the latest sheet data first so the recap is always current
+        sync_note = ""
+        try:
+            await asyncio.to_thread(sync_sheet)
+        except Exception:
+            log.exception("Sheet sync failed during /recap")
+            sync_note = "\n⚠️ Sheet sync failed - recap uses last-synced data."
+
+        data = await asyncio.to_thread(gather_recap_data, target_date)
+
+        # If no plays are found, sends a message
+        if data is None:
+            await interaction.followup.send(
+                f"No sheet plays found for **{target_date}**.{sync_note}",
+                ephemeral=True,
+            )
+            return
+
+        embed = build_recap_embed(data)
+
+        if preview:
+            await interaction.followup.send(
+                content=f"Preview only - not posted.{sync_note}",
+                embed=embed,
+                ephemeral=True,
+            )
+            return
+
+        try:
+            channel = await self._get_recap_channel()
+            await channel.send(embed=embed)
+        except discord.HTTPException:
+            log.exception("Failed to post recap to channel %s", RECAP_CHANNEL)
+            await interaction.followup.send(
+                "Couldn't post to the recap channel - check the bot's "
+                f"permissions and RECAP_CHANNEL.{sync_note}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(f"Posted Recap{sync_note}", ephemeral=True)
+
+    # Posts the recap automatically every day (if enabled in .env)
+    @tasks.loop(time=AUTO_RECAP_TIME)
+    async def auto_recap(self):
+        target_date = datetime.now(EASTERN).strftime("%Y-%m-%d")
+
+        try:
+            await asyncio.to_thread(sync_sheet)
+        except Exception:
+            log.exception("Sheet sync failed before auto-recap")
+
+        try:
+            data = await asyncio.to_thread(gather_recap_data, target_date)
+
+            if data is None:
+                log.info("Auto-recap: no plays for %s, skipping", target_date)
+                return
+
+            channel = await self._get_recap_channel()
+            await channel.send(embed=build_recap_embed(data))
+            log.info("Auto-recap posted for %s", target_date)
+        except Exception:
+            log.exception("Auto-recap failed for %s", target_date)
+
+    @auto_recap.before_loop
+    async def before_auto_recap(self):
+        await self.bot.wait_until_ready()
 
 
 async def setup(bot: commands.Bot):
