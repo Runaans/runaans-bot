@@ -5,7 +5,9 @@ from config import MONGO_URI, DB_NAME
 
 log = logging.getLogger("runaans.database")
 
-mongo = MongoClient(MONGO_URI)
+# Fail fast instead of blocking a worker thread (and the sync lock behind it)
+# for the default 30s when Mongo is unreachable.
+mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 db = mongo[DB_NAME]
 plays_col = db["plays"]
 

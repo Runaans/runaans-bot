@@ -25,6 +25,10 @@ log = logging.getLogger("runaans.sync_cog")
 # DM the owner after this many consecutive background sync failures
 FAILURE_ALERT_THRESHOLD = 3
 
+# Then remind every N further failures, so a permanently broken sync doesn't
+# go quiet after a single DM
+REALERT_EVERY = 12
+
 
 # Blocking - run in a thread
 def gather_status_counts() -> dict:
@@ -92,9 +96,17 @@ class SyncCog(commands.Cog):
             else:
                 sync_line = f"✅ {stamp} - {last['stats'].summary()}"
 
-        auto_sync_line = (
-            f"every {AUTO_SYNC_MINUTES} min" if AUTO_SYNC_MINUTES > 0 else "off"
-        )
+        if AUTO_SYNC_MINUTES <= 0:
+            auto_sync_line = "off"
+        elif self.auto_sync.failed():
+            auto_sync_line = f"❌ crashed (was every {AUTO_SYNC_MINUTES} min)"
+        elif not self.auto_sync.is_running():
+            auto_sync_line = f"⚠️ stopped (was every {AUTO_SYNC_MINUTES} min)"
+        else:
+            auto_sync_line = f"every {AUTO_SYNC_MINUTES} min"
+
+        if self.consecutive_failures:
+            auto_sync_line += f"\n{self.consecutive_failures} failure(s) in a row"
         auto_recap_line = (
             f"daily at {AUTO_RECAP_TIME.strftime('%H:%M')} ET"
             if AUTO_RECAP_ENABLED
@@ -129,7 +141,10 @@ class SyncCog(commands.Cog):
                 "Background sheet sync failed (%s in a row)",
                 self.consecutive_failures,
             )
-            if self.consecutive_failures >= FAILURE_ALERT_THRESHOLD and not self.alerted:
+
+            # Alert at the threshold, then again every REALERT_EVERY failures
+            over = self.consecutive_failures - FAILURE_ALERT_THRESHOLD
+            if over >= 0 and over % REALERT_EVERY == 0:
                 await self._alert_owner()
             return
 
@@ -139,6 +154,8 @@ class SyncCog(commands.Cog):
         self.consecutive_failures = 0
         self.alerted = False
 
+    # Both DM helpers are best-effort: a notification must never take the
+    # loop down with it, so they swallow everything.
     async def _alert_owner(self):
         try:
             owner = await self.bot.fetch_user(OWNER_ID)
@@ -148,19 +165,26 @@ class SyncCog(commands.Cog):
                 "Recaps may be stale until this is fixed."
             )
             self.alerted = True
-        except discord.HTTPException:
+        except Exception:
             log.exception("Could not DM owner about sync failures")
 
     async def _notify_recovered(self):
         try:
             owner = await self.bot.fetch_user(OWNER_ID)
             await owner.send("✅ Sheet sync has recovered and is working again.")
-        except discord.HTTPException:
+        except Exception:
             log.exception("Could not DM owner about sync recovery")
 
     @auto_sync.before_loop
     async def before_auto_sync(self):
         await self.bot.wait_until_ready()
+
+    # A crashed loop would otherwise stay dead while /status still showed a
+    # stale-but-successful last sync
+    @auto_sync.error
+    async def auto_sync_error(self, error: BaseException):
+        log.error("Auto-sync loop crashed, restarting it", exc_info=error)
+        self.auto_sync.restart()
 
 
 async def setup(bot: commands.Bot):

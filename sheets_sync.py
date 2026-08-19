@@ -5,7 +5,9 @@ anywhere (bot, CLI scripts, tests) without side effects.
 """
 
 import logging
+import random
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -13,7 +15,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 from pymongo import UpdateOne
 
-from config import CREDENTIALS_FILE, SPREADSHEET_ID, SHEET_NAME, SHEET_DATA_START_ROW
+from config import (
+    CREDENTIALS_FILE,
+    SPREADSHEET_ID,
+    SHEET_NAME,
+    SHEET_DATA_START_ROW,
+    SHEET_RETRIES,
+)
 from database import plays_col
 from helpers import normalize_date, parse_units
 
@@ -62,12 +70,14 @@ class SyncStats:
 
         if self.bad_date_rows:
             shown = ", ".join(str(r) for r in self.bad_date_rows[:5])
-            more = "…" if len(self.bad_date_rows) > 5 else ""
+            more = "..." if len(self.bad_date_rows) > 5 else ""
             text += (
-                f"\n⚠️ {len(self.bad_date_rows)} row(s) skipped for an "
+                f"\nWarning: {len(self.bad_date_rows)} row(s) skipped for an "
                 f"unreadable date: {shown}{more}"
             )
 
+        # Deliberately ASCII-only: pull_sheets.py prints this to a Windows
+        # console, where a non-cp1252 character raises UnicodeEncodeError.
         return text
 
 
@@ -92,6 +102,54 @@ def map_result(win_col: str, profit: float | None) -> str | None:
 
 def _cell(row: list, index: int) -> str:
     return row[index].strip() if len(row) > index else ""
+
+
+# Google returns these when we're rate-limited or it's having a moment.
+# Anything else (403 no access, 404 wrong id) will never fix itself.
+RETRYABLE_STATUSES = {429, 500, 502, 503}
+
+
+def _retry_after(error) -> float | None:
+    try:
+        return float(error.response.headers.get("Retry-After"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def fetch_rows() -> list[list[str]]:
+    """Read the whole worksheet, retrying transient Google API failures.
+
+    /recap syncs before it renders, so a single 429 would otherwise turn the
+    most-used command into a stale recap.
+    """
+    delay = 2.0
+
+    for attempt in range(1, SHEET_RETRIES + 1):
+        try:
+            sheet = _get_client().open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            return sheet.get_all_values()
+        except gspread.exceptions.APIError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+
+            if status not in RETRYABLE_STATUSES or attempt == SHEET_RETRIES:
+                raise
+
+            # Honour Retry-After when Google sends one, otherwise back off
+            # exponentially with jitter. Capped so an interactive /recap
+            # still answers promptly.
+            retry_after = _retry_after(e)
+            wait = retry_after if retry_after is not None else delay + random.uniform(0, 1)
+            wait = max(0.5, min(wait, 15.0))
+
+            log.warning(
+                "Sheets read failed with %s (attempt %s/%s), retrying in %.1fs",
+                status, attempt, SHEET_RETRIES, wait,
+            )
+            time.sleep(wait)
+            delay *= 2
+
+    # Unreachable: the loop either returns or raises
+    raise RuntimeError("Sheets read exhausted retries")
 
 
 def sync_sheet() -> SyncStats:
@@ -119,9 +177,7 @@ def sync_sheet() -> SyncStats:
 def _do_sync() -> SyncStats:
     stats = SyncStats()
 
-    sheet = _get_client().open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-    all_rows = sheet.get_all_values()
-
+    all_rows = fetch_rows()
     data_rows = all_rows[SHEET_DATA_START_ROW - 1:]
 
     ops = []

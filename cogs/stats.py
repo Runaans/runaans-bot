@@ -1,15 +1,16 @@
 # imports
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 
-from config import GUILD_ID, RECAP_CHANNEL, PURPLE, GREEN, RED, EASTERN
+from config import GUILD_ID, RECAP_CHANNEL, BRAND, PURPLE, GREEN, RED, EASTERN
 from database import plays_col
-from helpers import owner_only, SHEET_FILTER, PENDING_FILTER, VALID_RESULTS
+from helpers import owner_only, fmt, SHEET_FILTER, PENDING_FILTER, VALID_RESULTS
 
 log = logging.getLogger("runaans.stats")
 
@@ -17,11 +18,6 @@ SOURCE_FILTER = SHEET_FILTER
 
 # How many pending plays to list before truncating
 PENDING_LIMIT = 25
-
-
-def fmt(value):
-    value = value + 0.0
-    return f"{value:+.2f}u"
 
 
 def period_query(period: str, today: str) -> tuple[dict, str]:
@@ -49,8 +45,11 @@ def gather_stats(date_filter: dict, capper: str | None) -> list[dict]:
     """Per-capper record, units and ROI for the given period."""
     match = {"$and": [SOURCE_FILTER, {"title": {"$ne": "Untitled"}}, date_filter]}
 
+    # re.escape: a capper name with (, [, + or * would be an invalid regex
     if capper:
-        match["$and"].append({"capper": {"$regex": f"^{capper}$", "$options": "i"}})
+        match["$and"].append(
+            {"capper": {"$regex": f"^{re.escape(capper)}$", "$options": "i"}}
+        )
 
     pipeline = [
         {"$match": match},
@@ -67,8 +66,11 @@ def gather_stats(date_filter: dict, capper: str | None) -> list[dict]:
         },
         {"$match": {"resultUpper": {"$in": list(VALID_RESULTS)}}},
         {
+            # Group case-insensitively so "runaan" and "Runaan" stay one row,
+            # but display the spelling as it appears in the sheet
             "$group": {
-                "_id": {"$ifNull": ["$capper", ""]},
+                "_id": {"$toUpper": {"$ifNull": ["$capper", ""]}},
+                "display": {"$first": {"$ifNull": ["$capper", ""]}},
                 "wins": {"$sum": {"$cond": [{"$eq": ["$resultUpper", "W"]}, 1, 0]}},
                 "losses": {"$sum": {"$cond": [{"$eq": ["$resultUpper", "L"]}, 1, 0]}},
                 "pushes": {"$sum": {"$cond": [{"$eq": ["$resultUpper", "P"]}, 1, 0]}},
@@ -84,7 +86,7 @@ def gather_stats(date_filter: dict, capper: str | None) -> list[dict]:
         staked = doc.get("staked") or 0.0
         rows.append(
             {
-                "capper": doc["_id"] or "Unknown",
+                "capper": doc.get("display") or "Unknown",
                 "wins": doc["wins"],
                 "losses": doc["losses"],
                 "pushes": doc["pushes"],
@@ -132,12 +134,12 @@ def build_stats_embed(rows: list[dict], label: str, capper: str | None) -> disco
     else:
         color = PURPLE
 
-    title = f"{capper} Stats - {label}" if capper else f"RunaansLocks Stats - {label}"
+    title = f"{capper} · {label}" if capper else f"{BRAND} Stats · {label}"
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(EASTERN))
 
     if not rows:
         embed.description = "No settled plays in this period."
-        embed.set_footer(text="Runaans Locks")
+        embed.set_footer(text=BRAND)
         return embed
 
     embed.description = (
@@ -159,7 +161,7 @@ def build_stats_embed(rows: list[dict], label: str, capper: str | None) -> disco
 
         embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
-    embed.set_footer(text="Runaans Locks")
+    embed.set_footer(text=BRAND)
     return embed
 
 
@@ -170,7 +172,7 @@ def build_pending_embed(plays: list[dict]) -> discord.Embed:
 
     if not plays:
         embed.description = "Nothing pending - every play is settled. 🎉"
-        embed.set_footer(text="Runaans Locks")
+        embed.set_footer(text=BRAND)
         return embed
 
     truncated = len(plays) > PENDING_LIMIT
@@ -200,9 +202,31 @@ def build_pending_embed(plays: list[dict]) -> discord.Embed:
     return embed
 
 
+# Blocking - run in a thread
+def known_cappers(current: str = "") -> list[str]:
+    names = plays_col.distinct("capper", SHEET_FILTER)
+    current = current.strip().lower()
+
+    return sorted(
+        n for n in names if n and (not current or current in n.lower())
+    )[:25]
+
+
 class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # Suggests capper names that exist in the data
+    async def capper_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            names = await asyncio.to_thread(known_cappers, current)
+        except Exception:
+            log.exception("Capper autocomplete failed")
+            return []
+
+        return [app_commands.Choice(name=n, value=n) for n in names]
 
     @app_commands.command(
         name="stats",
@@ -223,6 +247,7 @@ class StatsCog(commands.Cog):
             app_commands.Choice(name="All-time", value="all"),
         ]
     )
+    @app_commands.autocomplete(capper=capper_autocomplete)
     async def stats(
         self,
         interaction: discord.Interaction,

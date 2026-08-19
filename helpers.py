@@ -5,6 +5,12 @@ from discord import app_commands
 from config import OWNER_ID
 
 
+## Formats unit totals, e.g. +1.50u / -2.00u
+def fmt(value) -> str:
+    # `+ 0.0` collapses -0.0 to 0.0, which would otherwise render "+-0.00u"
+    return f"{(value or 0.0) + 0.0:+.2f}u"
+
+
 # Shared MongoDB query fragments so every command counts plays the same way
 VALID_RESULTS = ("W", "L", "P")
 

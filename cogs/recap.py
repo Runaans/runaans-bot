@@ -11,6 +11,7 @@ from discord import app_commands
 from config import (
     GUILD_ID,
     RECAP_CHANNEL,
+    BRAND,
     PURPLE,
     GREEN,
     RED,
@@ -19,7 +20,14 @@ from config import (
     AUTO_RECAP_TIME,
 )
 from database import plays_col
-from helpers import owner_only, normalize_date, parse_units, SHEET_FILTER, VALID_RESULTS
+from helpers import (
+    owner_only,
+    normalize_date,
+    parse_units,
+    fmt,
+    SHEET_FILTER,
+    VALID_RESULTS,
+)
 from sheets_sync import sync_sheet
 
 log = logging.getLogger("runaans.recap")
@@ -33,13 +41,6 @@ DESCRIPTION_LIMIT = 4096
 
 def clean_result(value):
     return (value or "").upper().strip()
-
-
-## Formats unit totals
-def fmt(value):
-    # `+ 0.0` collapses -0.0 to 0.0, which would otherwise render "+-0.00u"
-    value = value + 0.0
-    return f"{value:+.2f}u"
 
 
 # Calculates Monthly, Yearly, All-time totals (blocking - run in a thread)
@@ -177,6 +178,7 @@ def build_recap_embed(data: dict) -> discord.Embed:
     # Date Formatting
     dt = datetime.strptime(target_date, "%Y-%m-%d")
     pretty_date = f"{dt.month}/{dt.day}/{dt.year}"
+    weekday = dt.strftime("%a")
 
     # Combine plays, staying under Discord's description limit
     plays_text = "\n".join(rows) if rows else "No settled plays."
@@ -226,14 +228,14 @@ def build_recap_embed(data: dict) -> discord.Embed:
         color = PURPLE
 
     embed = discord.Embed(
-        title=f"RunaansLocks {pretty_date} Recap",
+        title=f"{BRAND} · {weekday} {pretty_date} Recap",
         description=plays_text,
         color=color,
         timestamp=datetime.now(EASTERN),
     )
 
-    embed.add_field(name="​", value=totals_text, inline=False)
-    embed.set_footer(text="Runaans Locks")
+    embed.add_field(name="📊 Totals", value=totals_text, inline=False)
+    embed.set_footer(text=BRAND)
 
     return embed
 
@@ -279,7 +281,9 @@ class RecapCog(commands.Cog):
             for d, n in dates
         ]
 
-    @app_commands.command(name="recap", description="Post the Recaps")
+    @app_commands.command(
+        name="recap", description="Post the daily Runaans Locks recap"
+    )
     @owner_only()
     @app_commands.describe(
         date="Date of the recap (e.g. 2026-08-19 or 8/19/2026), leave blank for today",
@@ -336,7 +340,7 @@ class RecapCog(commands.Cog):
 
         try:
             channel = await self._get_recap_channel()
-            await channel.send(embed=embed)
+            message = await channel.send(embed=embed)
         except discord.HTTPException:
             log.exception("Failed to post recap to channel %s", RECAP_CHANNEL)
             await interaction.followup.send(
@@ -346,7 +350,10 @@ class RecapCog(commands.Cog):
             )
             return
 
-        await interaction.followup.send(f"Posted Recap{sync_note}", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Posted to {channel.mention} - [jump]({message.jump_url}){sync_note}",
+            ephemeral=True,
+        )
 
     # Posts the recap automatically every day (if enabled in .env)
     @tasks.loop(time=AUTO_RECAP_TIME)
@@ -374,6 +381,11 @@ class RecapCog(commands.Cog):
     @auto_recap.before_loop
     async def before_auto_recap(self):
         await self.bot.wait_until_ready()
+
+    @auto_recap.error
+    async def auto_recap_error(self, error: BaseException):
+        log.error("Auto-recap loop crashed, restarting it", exc_info=error)
+        self.auto_recap.restart()
 
 
 async def setup(bot: commands.Bot):

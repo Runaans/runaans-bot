@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 # Make sure project root is available for imports
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,24 @@ from database import ensure_indexes
 from helpers import OwnerOnly
 
 discord.utils.setup_logging(level=logging.INFO)
+
+# Keep a rolling log on disk so an overnight failure leaves a trail.
+# encoding must be utf-8: log messages contain emoji, and the default on a
+# Windows host is cp1252, which raises UnicodeEncodeError on them.
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "bot.log"),
+    maxBytes=2_000_000,
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+)
+logging.getLogger().addHandler(_file_handler)
+
 log = logging.getLogger("runaans")
 
 intents = discord.Intents.default()

@@ -7,6 +7,7 @@ faked and the database module is stubbed out before anything imports it.
 """
 
 import os
+import re
 import sys
 import types
 import unittest
@@ -131,6 +132,9 @@ class TestRecapEmbed(unittest.TestCase):
         embed = recap.build_recap_embed(data)
         totals = embed.fields[0].value
 
+        # Title carries the brand and the weekday; 2026-08-19 is a Wednesday
+        self.assertEqual(embed.title, "Runaans Locks · Wed 8/19/2026 Recap")
+        self.assertEqual(embed.fields[0].name, "📊 Totals")
         self.assertIn("✅ Lakers ML +1.50u", embed.description)
         self.assertIn("❌ Jets +3.5 -1.00u", embed.description)
         self.assertIn("➖ Over 8.5 +0.00u", embed.description)
@@ -208,6 +212,12 @@ class TestSyncStats(unittest.TestCase):
         self.assertIn("2 row(s) skipped", summary)
         self.assertIn("14, 22", summary)
 
+    def test_summary_is_console_safe(self):
+        """pull_sheets.py prints this; a Windows console is cp1252, so a
+        stray emoji here would crash the CLI with UnicodeEncodeError."""
+        stats = sheets_sync.SyncStats(parsed=3, bad_date_rows=[14, 22, 30, 31, 32, 33])
+        stats.summary().encode("cp1252")
+
 
 class TestGatherRecapData(unittest.TestCase):
     def test_returns_none_when_day_is_empty(self):
@@ -269,7 +279,8 @@ class TestStatsEmbed(unittest.TestCase):
             [capper_row("Runaan", 1, 0, 1.0, 1.0)], "Today", "Runaan"
         )
         self.assertEqual(embed.fields, [])
-        self.assertIn("Runaan Stats", embed.title)
+        self.assertIn("Runaan", embed.title)
+        self.assertIn("Today", embed.title)
 
     def test_empty_period(self):
         embed = stats_cog.build_stats_embed([], "Today", None)
@@ -281,6 +292,122 @@ class TestStatsEmbed(unittest.TestCase):
             [capper_row("Runaan", 0, 0, 0.0, 0.0, pushes=1)], "Today", None
         )
         self.assertIn("ROI:** n/a", embed.description)
+
+
+class TestCapperFiltering(unittest.TestCase):
+    def test_capper_name_with_regex_characters_is_escaped(self):
+        """A name like "J (the Kid)" must not blow up the Mongo regex."""
+        captured = {}
+
+        class CapturingCollection:
+            def aggregate(self, pipeline):
+                captured["pipeline"] = pipeline
+                return []
+
+        original = stats_cog.plays_col
+        stats_cog.plays_col = CapturingCollection()
+        try:
+            stats_cog.gather_stats({}, "J (the Kid)")
+        finally:
+            stats_cog.plays_col = original
+
+        clauses = captured["pipeline"][0]["$match"]["$and"]
+        pattern = next(c for c in clauses if "capper" in c)["capper"]["$regex"]
+
+        # The parens must arrive escaped, not as a regex group
+        self.assertEqual(pattern, "^" + re.escape("J (the Kid)") + "$")
+        self.assertIn(r"\(", pattern)
+        re.compile(pattern)  # would raise if the name leaked through unescaped
+        self.assertTrue(re.fullmatch(pattern, "J (the Kid)"))
+
+    def test_grouping_is_case_insensitive(self):
+        captured = {}
+
+        class CapturingCollection:
+            def aggregate(self, pipeline):
+                captured["pipeline"] = pipeline
+                return []
+
+        original = stats_cog.plays_col
+        stats_cog.plays_col = CapturingCollection()
+        try:
+            stats_cog.gather_stats({}, None)
+        finally:
+            stats_cog.plays_col = original
+
+        group = next(s for s in captured["pipeline"] if "$group" in s)["$group"]
+        self.assertEqual(group["_id"], {"$toUpper": {"$ifNull": ["$capper", ""]}})
+        self.assertIn("display", group)
+
+
+class TestSheetRetry(unittest.TestCase):
+    def test_retries_on_429_then_succeeds(self):
+        import gspread
+
+        calls = {"n": 0}
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"Retry-After": "0"}
+            text = "rate limited"
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "rate limited", "code": 429}}
+
+        def flaky_client():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise gspread.exceptions.APIError(FakeResponse())
+            return FakeSheetClient()
+
+        class FakeSheetClient:
+            def open_by_key(self, _):
+                return self
+
+            def worksheet(self, _):
+                return self
+
+            def get_all_values(self):
+                return [["ok"]]
+
+        original = sheets_sync._get_client
+        sheets_sync._get_client = flaky_client
+        try:
+            self.assertEqual(sheets_sync.fetch_rows(), [["ok"]])
+        finally:
+            sheets_sync._get_client = original
+
+        self.assertEqual(calls["n"], 3)
+
+    def test_does_not_retry_permission_errors(self):
+        import gspread
+
+        calls = {"n": 0}
+
+        class FakeResponse:
+            status_code = 403
+            headers = {}
+            text = "forbidden"
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "forbidden", "code": 403}}
+
+        def denied_client():
+            calls["n"] += 1
+            raise gspread.exceptions.APIError(FakeResponse())
+
+        original = sheets_sync._get_client
+        sheets_sync._get_client = denied_client
+        try:
+            with self.assertRaises(gspread.exceptions.APIError):
+                sheets_sync.fetch_rows()
+        finally:
+            sheets_sync._get_client = original
+
+        # 403 will never succeed - fail immediately instead of burning retries
+        self.assertEqual(calls["n"], 1)
 
 
 class TestPendingEmbed(unittest.TestCase):

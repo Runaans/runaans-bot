@@ -9,7 +9,7 @@ All commands are owner-only and reply privately unless they post to the recap ch
 | Command | What it does |
 | --- | --- |
 | `/recap [date] [preview]` | Posts the daily recap. Syncs the sheet first, so it's always current. `date` autocompletes to dates that actually have plays and accepts `2026-08-19`, `8/19/2026`, `8/19/26`, etc.; blank = today (Eastern). `preview: True` shows it only to you first. |
-| `/stats [period] [capper] [post]` | Record, units, and ROI for today / last 7 days / month / year / all-time, with a per-capper leaderboard. `capper` narrows to one person; `post: True` shares it in the recap channel. |
+| `/stats [period] [capper] [post]` | Record, units, and ROI for today / last 7 days / month / year / all-time, with a per-capper leaderboard. `capper` autocompletes from names in the sheet and narrows to one person; `post: True` shares it in the recap channel. |
 | `/pending` | Lists every play that hasn't been graded yet, with odds, units, and capper. |
 | `/sync` | Pulls the latest sheet data into MongoDB on demand. |
 | `/status` | Health check: last sync result and time, auto-sync/auto-recap settings, play counts, uptime. |
@@ -18,7 +18,9 @@ All commands are owner-only and reply privately unless they post to the recap ch
 
 - Background auto-sync every 15 minutes (configurable), so the database always mirrors the sheet — including rows that were edited, deleted, or moved
 - Optional scheduled daily recap post (off by default)
-- DMs you if the background sync fails repeatedly, and again when it recovers
+- Retries rate-limited Google Sheets reads with backoff, so a busy moment doesn't turn `/recap` into stale data
+- DMs you if the background sync fails repeatedly, reminds you while it stays broken, and tells you when it recovers
+- Rolling log file in `logs/bot.log` so overnight failures leave a trail
 - Daily record (W-L-P), pending count, and monthly / yearly / all-time unit totals
 - Embeds turn green on winning days and red on losing days
 - Warns you when a sheet row is skipped because its date can't be read, instead of dropping the play silently
@@ -50,12 +52,18 @@ All commands are owner-only and reply privately unless they post to the recap ch
    | `AUTO_SYNC_MINUTES` | no | Background sync interval, `0` disables (default `15`) |
    | `AUTO_RECAP_ENABLED` | no | `1` to auto-post the recap daily (default off) |
    | `AUTO_RECAP_TIME` | no | Daily auto-recap time in Eastern, `HH:MM` (default `23:00`) |
+   | `SHEET_RETRIES` | no | Retries for a rate-limited Sheets read (default `3`) |
+   | `BRAND` | no | Name in embed titles/footers (default `Runaans Locks`) |
 
 3. Run the bot:
 
    ```
    python main.py
    ```
+
+## Running it unattended
+
+`run_bot.bat` starts the bot and restarts it if it exits, giving up after 10 restarts so a broken `.env` doesn't spin forever. To have it survive reboots, add it to Windows Task Scheduler with the "At log on" trigger and "Restart if the task fails" enabled.
 
 ## Scripts
 

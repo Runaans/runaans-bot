@@ -19,6 +19,9 @@ GUILD_ID = discord.Object(id=int(get_required_env("GUILD_ID")))
 RECAP_CHANNEL = int(get_required_env("RECAP_CHANNEL"))
 OWNER_ID = int(get_required_env("OWNER_ID"))
 
+# One spelling of the brand, used in every embed title and footer
+BRAND = os.getenv("BRAND", "Runaans Locks")
+
 PURPLE = discord.Color.from_rgb(138, 43, 226)
 GREEN = discord.Color.from_rgb(0, 200, 100)
 RED = discord.Color.from_rgb(220, 50, 50)
@@ -64,6 +67,9 @@ def _get_time_env(name: str, default: str):
 # Floored at 1: a value of 0 would slice the sheet down to a single row and
 # make the sync treat every other play as deleted.
 SHEET_DATA_START_ROW = max(1, _get_int_env("SHEET_DATA_START_ROW", 12))
+
+# How many times to retry a rate-limited/transient Google Sheets read
+SHEET_RETRIES = max(1, _get_int_env("SHEET_RETRIES", 3))
 
 # Background sheet -> MongoDB sync interval in minutes (0 disables it)
 AUTO_SYNC_MINUTES = _get_int_env("AUTO_SYNC_MINUTES", 15)
