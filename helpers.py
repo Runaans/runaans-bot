@@ -5,6 +5,23 @@ from discord import app_commands
 from config import OWNER_ID
 
 
+# Shared MongoDB query fragments so every command counts plays the same way
+VALID_RESULTS = ("W", "L", "P")
+
+# Recaps and stats only ever consider plays imported from the sheet
+SHEET_FILTER = {"source": "sheet"}
+
+# A play is pending until it has been graded W/L/P
+PENDING_FILTER = {
+    "$or": [
+        {"result": None},
+        {"result": ""},
+        {"result": {"$exists": False}},
+        {"result": {"$nin": list(VALID_RESULTS)}},
+    ]
+}
+
+
 class OwnerOnly(app_commands.CheckFailure):
     pass
 

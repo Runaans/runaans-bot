@@ -16,7 +16,7 @@ from config import (
     AUTO_RECAP_TIME,
 )
 from database import plays_col
-from helpers import owner_only
+from helpers import owner_only, SHEET_FILTER, PENDING_FILTER
 import sheets_sync
 from sheets_sync import sync_sheet
 
@@ -28,8 +28,8 @@ FAILURE_ALERT_THRESHOLD = 3
 
 # Blocking - run in a thread
 def gather_status_counts() -> dict:
-    total = plays_col.count_documents({"source": "sheet"})
-    pending = plays_col.count_documents({"source": "sheet", "result": None})
+    total = plays_col.count_documents(SHEET_FILTER)
+    pending = plays_col.count_documents({"$and": [SHEET_FILTER, PENDING_FILTER]})
     return {"total": total, "pending": pending}
 
 

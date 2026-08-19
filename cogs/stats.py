@@ -9,12 +9,11 @@ from discord import app_commands
 
 from config import GUILD_ID, RECAP_CHANNEL, PURPLE, GREEN, RED, EASTERN
 from database import plays_col
-from helpers import owner_only
+from helpers import owner_only, SHEET_FILTER, PENDING_FILTER, VALID_RESULTS
 
 log = logging.getLogger("runaans.stats")
 
-SOURCE_FILTER = {"source": "sheet"}
-VALID_RESULTS = ("W", "L", "P")
+SOURCE_FILTER = SHEET_FILTER
 
 # How many pending plays to list before truncating
 PENDING_LIMIT = 25
@@ -104,14 +103,7 @@ def gather_pending() -> list[dict]:
         "$and": [
             SOURCE_FILTER,
             {"title": {"$ne": "Untitled"}},
-            {
-                "$or": [
-                    {"result": None},
-                    {"result": ""},
-                    {"result": {"$exists": False}},
-                    {"result": {"$nin": list(VALID_RESULTS)}},
-                ]
-            },
+            PENDING_FILTER,
         ]
     }
 

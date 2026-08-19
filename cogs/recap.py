@@ -19,15 +19,13 @@ from config import (
     AUTO_RECAP_TIME,
 )
 from database import plays_col
-from helpers import owner_only, normalize_date, parse_units
+from helpers import owner_only, normalize_date, parse_units, SHEET_FILTER, VALID_RESULTS
 from sheets_sync import sync_sheet
 
 log = logging.getLogger("runaans.recap")
 
-VALID_RESULTS = {"W", "L", "P"}
-
 # Makes sure recaps only come from the google sheet
-SOURCE_FILTER = {"source": "sheet"}
+SOURCE_FILTER = SHEET_FILTER
 
 # Discord embed limits
 DESCRIPTION_LIMIT = 4096
@@ -79,7 +77,7 @@ def sum_profit(extra_query=None):
         },
         {
             "$match": {
-                "resultUpper": {"$in": ["W", "L", "P"]}
+                "resultUpper": {"$in": list(VALID_RESULTS)}
             }
         },
         {
