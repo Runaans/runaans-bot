@@ -467,11 +467,9 @@ class TestBetEmbeds(unittest.TestCase):
 
         self.assertEqual(len(embeds), 1)
         embed = embeds[0]
-        # Brand goes in the author line (plain white). A title would render as
-        # a blue link because the embed URL is set for gallery grouping.
-        self.assertEqual(embed.author.name, "Runaans Locks")
-        self.assertIsNone(embed.title)
-        self.assertEqual(embed.url, "https://runaanslocks.com")
+        # Plain white title: no URL on the embed, or Discord makes it a blue link
+        self.assertEqual(embed.title, "Runaans Locks")
+        self.assertIsNone(embed.url)
         self.assertEqual(
             embed.description, "> FD 50% Boost Stimmy\n\nback from vacation, time to lock in"
         )
@@ -485,15 +483,16 @@ class TestBetEmbeds(unittest.TestCase):
         embed = build_bet_embeds(units=[], note="lean", image_names=["slip1.png"])[0]
         self.assertEqual(embed.fields, [])
 
-    def test_multiple_slips_share_one_gallery_block(self):
+    def test_multiple_slips_stack_full_width_in_one_column(self):
         from cogs.bets import build_bet_embeds
 
         embeds = build_bet_embeds(
             units=["0.15U", "0.1U"], image_names=["slip1.png", "slip2.jpg", "slip3.png"]
         )
 
-        # Same URL on every embed is what makes Discord merge them into one block
-        self.assertEqual(len({e.url for e in embeds}), 1)
+        # No URLs: a shared URL would merge them into a cropped 2x2 gallery
+        self.assertEqual([e.url for e in embeds], [None, None, None])
+        self.assertEqual(len(embeds), 3)
         self.assertEqual(
             [e.image.url for e in embeds],
             ["attachment://slip1.png", "attachment://slip2.jpg", "attachment://slip3.png"],

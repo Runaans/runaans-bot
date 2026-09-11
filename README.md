@@ -21,7 +21,7 @@ Post like normal — paste or upload the slip screenshot(s), type the units and 
 back from vacation, time to lock in
 ```
 
-The bot replaces your message with one clean block: a short first line becomes the quoted headline, the rest is the write-up, units go in their own field, and up to 4 screenshots are grouped into a single gallery. Every post pings **@Premium** (change the role with `PING_ROLE`). Only the owner's messages are picked up.
+The bot replaces your message with one clean block: a short first line becomes the quoted headline, the rest is the write-up, units go in their own field, and every screenshot is shown full-size, one under the other (up to 10). Every post pings **@Premium** (change the role with `PING_ROLE`). Only the owner's messages are picked up.
 
 If @Playbook is tagged too, the bot waits for Playbook's reply (up to `PLAYBOOK_WAIT_SECONDS`), puts its betslip link on a **Place this bet at DraftKings** button under the block, and deletes Playbook's card along with your original. The sportsbook word after @Playbook is left out of the note. If Playbook doesn't answer in time, the post goes up without the button.
 
@@ -67,7 +67,6 @@ The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to 
    | `AUTO_RECAP_TIME` | no | Daily auto-recap time in Eastern, `HH:MM` (default `23:00`) |
    | `SHEET_RETRIES` | no | Retries for a rate-limited Sheets read (default `3`) |
    | `BRAND` | no | Name in embed titles/footers (default `Runaans Locks`) |
-   | `BRAND_URL` | no | Where the title of bet posts links (default `https://runaanslocks.com`) |
    | `PING_ROLE` | no | Role name every bet post pings (default `Premium`) |
    | `PLAYBOOK_BOT_ID` | no | Playbook AI's bot user ID, whose betslip link is borrowed (`0` disables) |
    | `PLAYBOOK_WAIT_SECONDS` | no | How long to wait for Playbook's reply (default `30`) |

@@ -12,7 +12,6 @@ from discord.ext import commands
 from config import (
     OWNER_ID,
     BRAND,
-    BRAND_URL,
     PURPLE,
     EASTERN,
     PING_ROLE,
@@ -22,7 +21,7 @@ from config import (
 
 log = logging.getLogger("runaans.bets")
 
-# Discord allows 10 embeds per message; the first 4 images render as one gallery
+# Discord allows 10 embeds per message, one screenshot each
 MAX_SLIPS = 10
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -120,8 +119,9 @@ def build_bet_embeds(
 ) -> list[discord.Embed]:
     """One bet block: headline quote, write-up, units, then the slips.
 
-    Every embed gets the same URL so Discord renders all slip images inside
-    the first block as a gallery instead of stacking separate cards.
+    Each screenshot gets its own embed so they stack full-width in one
+    column. (Giving the embeds a shared URL would merge them into a 2x2
+    gallery that crops the slips, and would turn the title into a link.)
     """
     description = []
     if headline:
@@ -129,16 +129,13 @@ def build_bet_embeds(
     if note:
         description.append(note)
 
-    # No title on purpose: the URL is needed for gallery grouping, and a
-    # title would render as a blue link. The brand goes in the author line,
-    # which shows as plain white text.
+    # No URL anywhere, so the title stays plain white text
     embed = discord.Embed(
-        url=BRAND_URL,
+        title=BRAND,
         description="\n\n".join(description)[:4096] or None,
         color=PURPLE,
         timestamp=datetime.now(EASTERN),
     )
-    embed.set_author(name=BRAND)
 
     if units:
         embed.add_field(name="Units", value="\n".join(units), inline=True)
@@ -153,7 +150,7 @@ def build_bet_embeds(
             embed.set_image(url=f"attachment://{name}")
             continue
 
-        extra = discord.Embed(url=BRAND_URL, color=PURPLE)
+        extra = discord.Embed(color=PURPLE)
         extra.set_image(url=f"attachment://{name}")
         embeds.append(extra)
 

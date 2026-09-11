@@ -22,9 +22,6 @@ OWNER_ID = int(get_required_env("OWNER_ID"))
 # One spelling of the brand, used in every embed title and footer
 BRAND = os.getenv("BRAND", "Runaans Locks")
 
-# Where the brand title links to in /bet posts
-BRAND_URL = os.getenv("BRAND_URL", "https://runaanslocks.com")
-
 # Role that every bet post pings (matched by name, case-insensitive)
 PING_ROLE = os.getenv("PING_ROLE", "Premium")
 
