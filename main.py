@@ -41,7 +41,7 @@ log = logging.getLogger("runaans")
 intents = discord.Intents.default()
 intents.guilds = True
 
-COGS = ["cogs.recap", "cogs.sync", "cogs.stats"]
+COGS = ["cogs.recap", "cogs.sync", "cogs.stats", "cogs.bets"]
 
 class Client(commands.Bot):
     def __init__(self):

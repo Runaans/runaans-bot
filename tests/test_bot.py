@@ -433,6 +433,75 @@ class TestPendingEmbed(unittest.TestCase):
         self.assertLessEqual(len(embed.description), 4096)
 
 
+class TestBetPost(unittest.TestCase):
+    def test_units_formatting(self):
+        from cogs.bets import format_units
+
+        self.assertEqual(format_units("1u"), "1U")
+        self.assertEqual(format_units("0.15u, 0.1U"), "0.15U\n0.1U")
+        self.assertEqual(format_units("2 units"), "2 units")  # kept as typed
+
+    def test_single_slip_block(self):
+        from cogs.bets import build_bet_embeds
+
+        embeds = build_bet_embeds(
+            units="0.25u",
+            headline="FD 50% Boost Stimmy",
+            note="Back from vacation, time to lock in",
+            odds="+1021",
+            book="FanDuel",
+            image_names=["slip1.png"],
+            author="Runaans",
+        )
+
+        self.assertEqual(len(embeds), 1)
+        embed = embeds[0]
+        self.assertEqual(embed.title, "Runaans Locks")
+        self.assertTrue(
+            embed.description.startswith("> FD 50% Boost Stimmy\n\nBack from vacation")
+        )
+        self.assertEqual(
+            [(f.name, f.value) for f in embed.fields],
+            [("Units", "0.25U"), ("Odds", "+1021"), ("Book", "FanDuel")],
+        )
+        self.assertEqual(embed.image.url, "attachment://slip1.png")
+        self.assertEqual(embed.footer.text, "Runaans")
+
+    def test_multiple_slips_share_one_gallery_block(self):
+        from cogs.bets import build_bet_embeds
+
+        embeds = build_bet_embeds(
+            units="0.15u, 0.1u", image_names=["slip1.png", "slip2.jpg", "slip3.png"]
+        )
+
+        # Same URL on every embed is what makes Discord merge them into one block
+        self.assertEqual(len({e.url for e in embeds}), 1)
+        self.assertEqual(
+            [e.image.url for e in embeds],
+            ["attachment://slip1.png", "attachment://slip2.jpg", "attachment://slip3.png"],
+        )
+        # Only the first carries the text
+        self.assertEqual([e.fields for e in embeds[1:]], [[], []])
+
+    def test_link_button(self):
+        from cogs.bets import build_link_view, is_valid_link
+
+        self.assertFalse(is_valid_link("dk.com/slip"))
+        self.assertFalse(is_valid_link("https://x.com/" + "a" * 600))
+        self.assertIsNone(build_link_view(None, "DraftKings"))
+
+        view = build_link_view("https://sportsbook.draftkings.com/x", "DraftKings")
+        button = view.children[0]
+        self.assertEqual(button.label, "Bet this at DraftKings")
+        self.assertEqual(button.url, "https://sportsbook.draftkings.com/x")
+
+    def test_slip_filenames(self):
+        from cogs.bets import slip_filename
+
+        self.assertEqual(slip_filename(1, "IMG_2231.JPG"), "slip1.jpg")
+        self.assertEqual(slip_filename(2, "weird.heic"), "slip2.png")
+
+
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
     """Loads every cog into a real Bot - catches command registration,
     decorator and signature errors without connecting to Discord."""
@@ -447,11 +516,13 @@ class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
         bot = dpy_commands.Bot(command_prefix="!", intents=intents)
 
         try:
-            for cog in ("cogs.recap", "cogs.sync", "cogs.stats"):
+            for cog in ("cogs.recap", "cogs.sync", "cogs.stats", "cogs.bets"):
                 await bot.load_extension(cog)
 
             names = {c.name for c in bot.tree.get_commands(guild=GUILD_ID)}
-            self.assertEqual(names, {"recap", "sync", "status", "stats", "pending"})
+            self.assertEqual(
+                names, {"recap", "sync", "status", "stats", "pending", "bet"}
+            )
 
             # /recap must offer autocomplete on its date option
             recap_cmd = next(
