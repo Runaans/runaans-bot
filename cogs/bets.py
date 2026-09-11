@@ -1,4 +1,5 @@
 # imports
+import asyncio
 import io
 import logging
 import os
@@ -8,7 +9,16 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
-from config import OWNER_ID, BRAND, BRAND_URL, PURPLE, EASTERN, PING_ROLE
+from config import (
+    OWNER_ID,
+    BRAND,
+    BRAND_URL,
+    PURPLE,
+    EASTERN,
+    PING_ROLE,
+    PLAYBOOK_BOT_ID,
+    PLAYBOOK_WAIT_SECONDS,
+)
 
 log = logging.getLogger("runaans.bets")
 
@@ -21,19 +31,35 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 UNITS_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*u(?:nits?)?\b", re.IGNORECASE)
 MENTION_RE = re.compile(r"<@!?\d+>")
 
+# The sportsbook name typed after @Playbook is for Playbook, not the note
+BOOK_WORDS = (
+    r"draftkings|dk|fanduel|fd|bet365|365|betmgm|mgm|thescore|caesars|"
+    r"betrivers|fanatics|pointsbet|proline|espn\s*bet"
+)
+
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
+# Playbook's button reads "Find your DraftKings betslip at Playbook"
+PLAYBOOK_LABEL_RE = re.compile(r"find your (.+?) betslip", re.IGNORECASE)
+URL_RE = re.compile(r"https?://\S+")
 
-def parse_post(text: str) -> dict:
+
+def parse_post(text: str, playbook_id: int | None = None) -> dict:
     """Pull units out of a normal message and split it into headline + note.
 
-        @RunaansLocks 0.25u FD 50% Boost Stimmy
+        @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
         back from vacation, time to lock in
 
     -> units ["0.25U"], headline "FD 50% Boost Stimmy", note "back from ..."
     """
-    text = MENTION_RE.sub("", text or "")
+    text = text or ""
+
+    if playbook_id:
+        text = re.sub(
+            rf"<@!?{playbook_id}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
+        )
+    text = MENTION_RE.sub("", text)
 
     units = [f"{float(m.group(1)):g}U" for m in UNITS_RE.finditer(text)]
     text = UNITS_RE.sub("", text)
@@ -60,6 +86,27 @@ def is_image(attachment: discord.Attachment) -> bool:
 def slip_filename(index: int, original: str) -> str:
     ext = os.path.splitext(original)[1].lower()
     return f"slip{index}{ext if ext in IMAGE_EXTENSIONS else '.png'}"
+
+
+def extract_betslip(message) -> dict | None:
+    """Find the betslip link (and book name) in a Playbook reply.
+
+    Prefers the link button; falls back to a URL in the embed text.
+    """
+    for row in getattr(message, "components", None) or []:
+        for comp in getattr(row, "children", None) or []:
+            url = getattr(comp, "url", None)
+            if url:
+                label = getattr(comp, "label", "") or ""
+                m = PLAYBOOK_LABEL_RE.search(label)
+                return {"url": url, "book": m.group(1) if m else None}
+
+    for embed in getattr(message, "embeds", None) or []:
+        m = URL_RE.search(embed.description or "")
+        if m:
+            return {"url": m.group(0).rstrip(")>."), "book": None}
+
+    return None
 
 
 def build_bet_embeds(
@@ -113,6 +160,17 @@ def build_bet_embeds(
     return embeds
 
 
+def build_betslip_view(betslip: dict | None) -> discord.ui.View | None:
+    if not betslip:
+        return None
+
+    label = f"Place this bet at {betslip['book']}" if betslip.get("book") else "Place this bet"
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label=label[:80], url=betslip["url"]))
+    return view
+
+
 class BetsCog(commands.Cog):
     """Turns '@RunaansLocks 1u <note> + screenshot' into a clean bet post."""
 
@@ -124,6 +182,30 @@ class BetsCog(commands.Cog):
         return discord.utils.find(
             lambda r: r.name.lower() == PING_ROLE.lower(), guild.roles
         )
+
+    async def _wait_for_playbook(self, original: discord.Message):
+        """Wait for Playbook's reply to `original`, then re-fetch it so its
+        button/embed are populated (the live event omits them without the
+        message-content intent)."""
+
+        def is_reply(m: discord.Message) -> bool:
+            return (
+                m.author.id == PLAYBOOK_BOT_ID
+                and m.channel.id == original.channel.id
+                and m.reference is not None
+                and m.reference.message_id == original.id
+            )
+
+        try:
+            reply = await self.bot.wait_for("message", check=is_reply, timeout=PLAYBOOK_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            log.warning("Playbook didn't reply within %ss - posting without a link", PLAYBOOK_WAIT_SECONDS)
+            return None
+
+        try:
+            return await original.channel.fetch_message(reply.id)
+        except discord.HTTPException:
+            return reply
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -144,7 +226,16 @@ class BetsCog(commands.Cog):
             )
             return
 
-        parsed = parse_post(message.content)
+        parsed = parse_post(message.content, PLAYBOOK_BOT_ID)
+
+        # If Playbook was tagged too, borrow its betslip link for the button
+        playbook_msg = None
+        if PLAYBOOK_BOT_ID and PLAYBOOK_WAIT_SECONDS and any(
+            u.id == PLAYBOOK_BOT_ID for u in message.mentions
+        ):
+            playbook_msg = await self._wait_for_playbook(message)
+
+        betslip = extract_betslip(playbook_msg) if playbook_msg else None
 
         # Re-upload the screenshots with the new post so they survive the
         # original message being deleted
@@ -163,6 +254,7 @@ class BetsCog(commands.Cog):
             author=message.author.display_name,
             author_icon=message.author.display_avatar.url,
         )
+        view = build_betslip_view(betslip)
 
         role = self._ping_role(message.guild)
         if role is None and not self.warned_missing_role:
@@ -185,6 +277,7 @@ class BetsCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, users=False, roles=[role] if role else False
                 ),
+                **({"view": view} if view else {}),
             )
         except discord.HTTPException:
             log.exception("Failed to post bet in #%s", message.channel)
@@ -196,13 +289,16 @@ class BetsCog(commands.Cog):
             )
             return
 
-        # The clean post replaces the original message
-        try:
-            await message.delete()
-        except discord.Forbidden:
-            log.warning("Posted the bet but can't delete the original - missing Manage Messages")
-        except discord.HTTPException:
-            log.warning("Posted the bet but couldn't delete the original", exc_info=True)
+        # The clean post replaces the original message and Playbook's card
+        for old in (message, playbook_msg):
+            if old is None:
+                continue
+            try:
+                await old.delete()
+            except discord.Forbidden:
+                log.warning("Posted the bet but can't delete the original - missing Manage Messages")
+            except discord.HTTPException:
+                log.warning("Posted the bet but couldn't delete a message", exc_info=True)
 
 
 async def setup(bot: commands.Bot):

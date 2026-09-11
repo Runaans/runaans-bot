@@ -515,18 +515,50 @@ class FakeAttachment:
         return b"\x89PNG\r\n\x1a\n"
 
 
+PLAYBOOK_ID = config.PLAYBOOK_BOT_ID
+
+
+def fake_playbook_reply(original_id, log, url="https://links.playbook.actionnetwork.com/nSNdo",
+                        label="Find your DraftKings betslip at Playbook"):
+    """Playbook AI's reply as fetched over REST: a link button, replying to the original."""
+
+    async def delete():
+        log.append(("delete_playbook", None))
+
+    return types.SimpleNamespace(
+        id=777,
+        author=types.SimpleNamespace(id=PLAYBOOK_ID, bot=True),
+        channel=types.SimpleNamespace(id=1),
+        reference=types.SimpleNamespace(message_id=original_id),
+        components=[types.SimpleNamespace(children=[types.SimpleNamespace(label=label, url=url)])],
+        embeds=[],
+        delete=delete,
+    )
+
+
 def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=None,
-                 content="<@999> 1u lock", fail_send=False):
-    """A message as the bets listener sees it. `log` records call order."""
+                 content="<@999> 1u lock", fail_send=False, mention_playbook=False,
+                 playbook=None):
+    """A message as the bets listener sees it, plus a fake bot. `log` records
+    call order. `playbook` is Playbook's reply, or None for a timeout."""
+    import asyncio
     import discord
 
     log = []
     bot_user = types.SimpleNamespace(id=999)
 
+    # Playbook's reply records its deletion into this same log
+    if callable(playbook):
+        playbook = playbook(log)
+
     async def channel_send(**kw):
         log.append(("send", kw))
         if fail_send:
             raise discord.Forbidden(types.SimpleNamespace(status=403, reason="x"), "nope")
+
+    async def fetch_message(message_id):
+        log.append(("fetch", message_id))
+        return playbook
 
     async def reply(text, **kw):
         log.append(("reply", text))
@@ -537,33 +569,79 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
     async def dm(text):
         log.append(("dm", text))
 
+    mentions = [bot_user] if mention_bot else []
+    if mention_playbook:
+        mentions.append(types.SimpleNamespace(id=PLAYBOOK_ID))
+
     msg = types.SimpleNamespace(
+        id=123,
         author=types.SimpleNamespace(
             id=author_id, bot=False, display_name="Runaans", send=dm,
             display_avatar=types.SimpleNamespace(url="https://cdn/x.png")),
         guild=types.SimpleNamespace(name="Runaans Locks", roles=roles or []),
-        mentions=[bot_user] if mention_bot else [],
+        mentions=mentions,
         attachments=[FakeAttachment()] if attachments is None else attachments,
         content=content,
-        channel=types.SimpleNamespace(send=channel_send),
+        channel=types.SimpleNamespace(id=1, send=channel_send, fetch_message=fetch_message),
         reply=reply,
         delete=delete,
     )
-    return msg, bot_user, log
+
+    async def wait_for(event, *, check, timeout):
+        log.append(("wait", timeout))
+        if playbook is None:
+            raise asyncio.TimeoutError
+        assert check(playbook), "listener's check rejected Playbook's own reply"
+        return playbook
+
+    bot = types.SimpleNamespace(user=bot_user, wait_for=wait_for)
+    return msg, bot, log
 
 
 PREMIUM = types.SimpleNamespace(id=555, name="Premium", mention="<@&555>")
 
 
 class TestBetListener(unittest.IsolatedAsyncioTestCase):
-    def cog(self, bot_user):
+    def cog(self, bot):
         from cogs.bets import BetsCog
 
-        return BetsCog(types.SimpleNamespace(user=bot_user))
+        return BetsCog(bot)
+
+    async def test_no_playbook_tag_means_no_waiting(self):
+        msg, bot, log = fake_message(roles=[PREMIUM])
+        await self.cog(bot).on_message(msg)
+        self.assertNotIn("wait", [name for name, _ in log])
+        self.assertNotIn("view", log[0][1])
+
+    async def test_playbook_link_becomes_button_and_its_card_is_deleted(self):
+        msg, bot, log = fake_message(
+            roles=[PREMIUM], mention_playbook=True,
+            content="<@999> <@%d> Draftkings 1u lock" % PLAYBOOK_ID,
+            playbook=lambda log: fake_playbook_reply(123, log),
+        )
+        await self.cog(bot).on_message(msg)
+
+        names = [name for name, _ in log]
+        self.assertEqual(names, ["wait", "fetch", "send", "delete", "delete_playbook"])
+        sent = log[2][1]
+        button = sent["view"].children[0]
+        self.assertEqual(button.label, "Place this bet at DraftKings")
+        self.assertEqual(button.url, "https://links.playbook.actionnetwork.com/nSNdo")
+        # "Draftkings" was for Playbook, not the note
+        self.assertEqual(sent["embeds"][0].description, "lock")
+
+    async def test_playbook_timeout_posts_without_button(self):
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=None)
+        await self.cog(bot).on_message(msg)
+
+        names = [name for name, _ in log]
+        self.assertEqual(names, ["wait", "send", "delete"])
+        self.assertNotIn("view", log[1][1])
+
 
     async def test_posts_pings_premium_then_deletes_original(self):
-        msg, bot_user, log = fake_message(roles=[PREMIUM])
-        await self.cog(bot_user).on_message(msg)
+        msg, bot, log = fake_message(roles=[PREMIUM])
+        await self.cog(bot).on_message(msg)
 
         self.assertEqual([name for name, _ in log], ["send", "delete"])
         sent = log[0][1]
@@ -574,18 +652,18 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
 
     async def test_ignores_other_people_and_unmentioned_messages(self):
         for kwargs in ({"author_id": 222}, {"mention_bot": False}):
-            msg, bot_user, log = fake_message(roles=[PREMIUM], **kwargs)
-            await self.cog(bot_user).on_message(msg)
+            msg, bot, log = fake_message(roles=[PREMIUM], **kwargs)
+            await self.cog(bot).on_message(msg)
             self.assertEqual(log, [], kwargs)
 
     async def test_no_screenshot_asks_for_one_and_keeps_message(self):
-        msg, bot_user, log = fake_message(roles=[PREMIUM], attachments=[])
-        await self.cog(bot_user).on_message(msg)
+        msg, bot, log = fake_message(roles=[PREMIUM], attachments=[])
+        await self.cog(bot).on_message(msg)
         self.assertEqual([name for name, _ in log], ["reply"])
 
     async def test_missing_role_posts_without_ping_and_dms_owner_once(self):
-        msg, bot_user, log = fake_message(roles=[])
-        cog = self.cog(bot_user)
+        msg, bot, log = fake_message(roles=[])
+        cog = self.cog(bot)
         await cog.on_message(msg)
         await cog.on_message(msg)
 
@@ -596,12 +674,47 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(1 for name, _ in log if name == "dm"), 1)
 
     async def test_failed_post_keeps_original_message(self):
-        msg, bot_user, log = fake_message(roles=[PREMIUM], fail_send=True)
-        await self.cog(bot_user).on_message(msg)
+        msg, bot, log = fake_message(roles=[PREMIUM], fail_send=True)
+        await self.cog(bot).on_message(msg)
 
         names = [name for name, _ in log]
         self.assertIn("reply", names)
         self.assertNotIn("delete", names)
+
+
+class TestPlaybookParsing(unittest.TestCase):
+    def test_book_word_after_playbook_is_dropped(self):
+        from cogs.bets import parse_post
+
+        for text in (
+            "<@999> <@%d> Draftkings 1u back from vacation" % PLAYBOOK_ID,
+            "<@999> 1u back from vacation <@!%d> dk" % PLAYBOOK_ID,
+            "<@999> 1u back from vacation <@%d>" % PLAYBOOK_ID,
+        ):
+            parsed = parse_post(text, PLAYBOOK_ID)
+            self.assertEqual(parsed["note"], "back from vacation", text)
+            self.assertEqual(parsed["units"], ["1U"])
+
+    def test_book_words_elsewhere_are_kept(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post("<@999> 1u bet365 is giving a 100%% boost <@%d> bet365" % PLAYBOOK_ID, PLAYBOOK_ID)
+        self.assertEqual(parsed["note"], "bet365 is giving a 100% boost")
+
+    def test_extract_betslip_prefers_button_then_embed_text(self):
+        from cogs.bets import extract_betslip
+
+        with_button = fake_playbook_reply(1, [], label="Find your bet365 betslip at Action")
+        self.assertEqual(extract_betslip(with_button),
+                         {"url": "https://links.playbook.actionnetwork.com/nSNdo", "book": "bet365"})
+
+        embed = types.SimpleNamespace(
+            description="We matched 1 of 1 markets! [Click here](https://links.playbook.actionnetwork.com/zQMgh)")
+        text_only = types.SimpleNamespace(components=[], embeds=[embed])
+        self.assertEqual(extract_betslip(text_only),
+                         {"url": "https://links.playbook.actionnetwork.com/zQMgh", "book": None})
+
+        self.assertIsNone(extract_betslip(types.SimpleNamespace(components=[], embeds=[])))
 
 
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
