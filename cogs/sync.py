@@ -1,22 +1,13 @@
 # imports
 import asyncio
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 
-from config import (
-    GUILD_ID,
-    OWNER_ID,
-    PURPLE,
-    AUTO_SYNC_MINUTES,
-    AUTO_RECAP_ENABLED,
-    AUTO_RECAP_TIME,
-)
-from database import plays_col
-from helpers import owner_only, SHEET_FILTER, PENDING_FILTER
+from config import GUILD_ID, OWNER_ID, AUTO_SYNC_MINUTES
+from helpers import owner_only
 import sheets_sync
 from sheets_sync import sync_sheet
 
@@ -30,19 +21,11 @@ FAILURE_ALERT_THRESHOLD = 3
 REALERT_EVERY = 12
 
 
-# Blocking - run in a thread
-def gather_status_counts() -> dict:
-    total = plays_col.count_documents(SHEET_FILTER)
-    pending = plays_col.count_documents({"$and": [SHEET_FILTER, PENDING_FILTER]})
-    return {"total": total, "pending": pending}
-
-
 class SyncCog(commands.Cog):
     """Keeps MongoDB in sync with the Google Sheet."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.started_at = datetime.now(timezone.utc)
         self.consecutive_failures = 0
         self.alerted = False
 
@@ -75,60 +58,6 @@ class SyncCog(commands.Cog):
         await interaction.followup.send(
             f"Sheet synced: {stats.summary()}.", ephemeral=True
         )
-
-    @app_commands.command(
-        name="status",
-        description="Bot health: last sync, uptime, play counts",
-    )
-    @owner_only()
-    async def status(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        counts = await asyncio.to_thread(gather_status_counts)
-        last = sheets_sync.last_sync
-
-        if last["time"] is None:
-            sync_line = "No sync has run yet."
-        else:
-            stamp = f"<t:{int(last['time'].timestamp())}:R>"
-            if last["error"]:
-                sync_line = f"❌ Failed {stamp}: `{last['error'][:200]}`"
-            else:
-                sync_line = f"✅ {stamp} - {last['stats'].summary()}"
-
-        if AUTO_SYNC_MINUTES <= 0:
-            auto_sync_line = "off"
-        elif self.auto_sync.failed():
-            auto_sync_line = f"❌ crashed (was every {AUTO_SYNC_MINUTES} min)"
-        elif not self.auto_sync.is_running():
-            auto_sync_line = f"⚠️ stopped (was every {AUTO_SYNC_MINUTES} min)"
-        else:
-            auto_sync_line = f"every {AUTO_SYNC_MINUTES} min"
-
-        if self.consecutive_failures:
-            auto_sync_line += f"\n{self.consecutive_failures} failure(s) in a row"
-        auto_recap_line = (
-            f"daily at {AUTO_RECAP_TIME.strftime('%H:%M')} ET"
-            if AUTO_RECAP_ENABLED
-            else "off"
-        )
-
-        embed = discord.Embed(title="Bot Status", color=PURPLE)
-        embed.add_field(name="Last sync", value=sync_line, inline=False)
-        embed.add_field(name="Auto-sync", value=auto_sync_line, inline=True)
-        embed.add_field(name="Auto-recap", value=auto_recap_line, inline=True)
-        embed.add_field(
-            name="Plays",
-            value=f"{counts['total']} total, {counts['pending']} pending",
-            inline=True,
-        )
-        embed.add_field(
-            name="Online since",
-            value=f"<t:{int(self.started_at.timestamp())}:R>",
-            inline=True,
-        )
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # Background sheet sync so recap data is always fresh
     @tasks.loop(minutes=15)

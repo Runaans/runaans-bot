@@ -10,10 +10,8 @@ All commands are owner-only and reply privately unless they post to the recap ch
 | --- | --- |
 | `/recap [date] [preview]` | Posts the daily recap. Syncs the sheet first, so it's always current. `date` autocompletes to dates that actually have plays and accepts `2026-08-19`, `8/19/2026`, `8/19/26`, etc.; blank = today (Eastern). `preview: True` shows it only to you first. |
 | `/stats [period] [capper] [post]` | Record, units, and ROI for today / last 7 days / month / year / all-time, with a per-capper leaderboard. `capper` autocompletes from names in the sheet and narrows to one person; `post: True` shares it in the recap channel. |
-| `/pending` | Lists every play that hasn't been graded yet, with odds, units, and capper. |
 | `/bet slip units [headline] [note] [odds] [book] [ping] [link] [slip2-4] [preview]` | Posts a play in the current channel as one clean block: headline quote, write-up, Units/Odds/Book, and up to 4 slip screenshots grouped into a single gallery. `ping` notifies a role like @Premium (the role must be mentionable, or the bot needs Mention Everyone). `link` adds a "Bet this at …" button. `preview: True` shows it only to you first. |
 | `/sync` | Pulls the latest sheet data into MongoDB on demand. |
-| `/status` | Health check: last sync result and time, auto-sync/auto-recap settings, play counts, uptime. |
 
 ## Features
 
@@ -22,8 +20,8 @@ All commands are owner-only and reply privately unless they post to the recap ch
 - Retries rate-limited Google Sheets reads with backoff, so a busy moment doesn't turn `/recap` into stale data
 - DMs you if the background sync fails repeatedly, reminds you while it stays broken, and tells you when it recovers
 - Rolling log file in `logs/bot.log` so overnight failures leave a trail
-- Daily record (W-L-P), pending count, and monthly / yearly / all-time unit totals
-- Embeds turn green on winning days and red on losing days
+- Daily, monthly, yearly, and all-time unit totals on every recap
+- `/stats` turns green for a winning period and red for a losing one
 - Warns you when a sheet row is skipped because its date can't be read, instead of dropping the play silently
 - Owner-only command protection
 - Uses environment variables to keep tokens and credentials private

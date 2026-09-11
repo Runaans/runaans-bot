@@ -409,30 +409,6 @@ class TestSheetRetry(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
 
-class TestPendingEmbed(unittest.TestCase):
-    def test_lists_pending_with_details(self):
-        plays = [
-            {"date": "2026-08-19", "title": "Lakers ML", "odds": "-110",
-             "units": 1.5, "capper": "Runaan"},
-        ]
-        embed = stats_cog.build_pending_embed(plays)
-        self.assertIn("⏳ **2026-08-19** Lakers ML", embed.description)
-        self.assertIn("-110, 1.50u, Runaan", embed.description)
-
-    def test_empty_state(self):
-        embed = stats_cog.build_pending_embed([])
-        self.assertIn("Nothing pending", embed.description)
-
-    def test_truncates_long_lists(self):
-        plays = [
-            {"date": "2026-08-19", "title": f"Play {i}"}
-            for i in range(stats_cog.PENDING_LIMIT + 5)
-        ]
-        embed = stats_cog.build_pending_embed(plays)
-        self.assertIn("and more", embed.description)
-        self.assertLessEqual(len(embed.description), 4096)
-
-
 class TestBetPost(unittest.TestCase):
     def test_units_formatting(self):
         from cogs.bets import format_units
@@ -521,7 +497,7 @@ class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
 
             names = {c.name for c in bot.tree.get_commands(guild=GUILD_ID)}
             self.assertEqual(
-                names, {"recap", "sync", "status", "stats", "pending", "bet"}
+                names, {"recap", "sync", "stats", "bet"}
             )
 
             # /recap must offer autocomplete on its date option

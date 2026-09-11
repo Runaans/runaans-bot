@@ -10,14 +10,11 @@ from discord import app_commands
 
 from config import GUILD_ID, RECAP_CHANNEL, BRAND, PURPLE, GREEN, RED, EASTERN
 from database import plays_col
-from helpers import owner_only, fmt, SHEET_FILTER, PENDING_FILTER, VALID_RESULTS
+from helpers import owner_only, fmt, SHEET_FILTER, VALID_RESULTS
 
 log = logging.getLogger("runaans.stats")
 
 SOURCE_FILTER = SHEET_FILTER
-
-# How many pending plays to list before truncating
-PENDING_LIMIT = 25
 
 
 def period_query(period: str, today: str) -> tuple[dict, str]:
@@ -99,23 +96,6 @@ def gather_stats(date_filter: dict, capper: str | None) -> list[dict]:
     return rows
 
 
-# Blocking - run in a thread
-def gather_pending() -> list[dict]:
-    query = {
-        "$and": [
-            SOURCE_FILTER,
-            {"title": {"$ne": "Untitled"}},
-            PENDING_FILTER,
-        ]
-    }
-
-    return list(
-        plays_col.find(query, sort=[("date", -1), ("sheet_row", 1)]).limit(
-            PENDING_LIMIT + 1
-        )
-    )
-
-
 def build_stats_embed(rows: list[dict], label: str, capper: str | None) -> discord.Embed:
     total_profit = sum(r["profit"] for r in rows)
     total_staked = sum(r["staked"] for r in rows)
@@ -162,43 +142,6 @@ def build_stats_embed(rows: list[dict], label: str, capper: str | None) -> disco
         embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
     embed.set_footer(text=BRAND)
-    return embed
-
-
-def build_pending_embed(plays: list[dict]) -> discord.Embed:
-    embed = discord.Embed(
-        title="Pending Plays", color=PURPLE, timestamp=datetime.now(EASTERN)
-    )
-
-    if not plays:
-        embed.description = "Nothing pending - every play is settled. 🎉"
-        embed.set_footer(text=BRAND)
-        return embed
-
-    truncated = len(plays) > PENDING_LIMIT
-    shown = plays[:PENDING_LIMIT]
-
-    lines = []
-    for p in shown:
-        bits = [f"⏳ **{p.get('date', '?')}** {p.get('title', 'Untitled')}"]
-
-        details = []
-        if p.get("odds"):
-            details.append(str(p["odds"]))
-        if p.get("units"):
-            details.append(f"{float(p['units']):.2f}u")
-        if p.get("capper"):
-            details.append(str(p["capper"]))
-        if details:
-            bits.append(f"({', '.join(details)})")
-
-        lines.append(" ".join(bits))
-
-    if truncated:
-        lines.append(f"… and more (showing first {PENDING_LIMIT})")
-
-    embed.description = "\n".join(lines)[:4096]
-    embed.set_footer(text=f"{len(shown)}{'+' if truncated else ''} pending")
     return embed
 
 
@@ -281,17 +224,6 @@ class StatsCog(commands.Cog):
             return
 
         await interaction.followup.send("Posted stats.")
-
-    @app_commands.command(
-        name="pending",
-        description="Show plays that haven't been graded yet",
-    )
-    @owner_only()
-    async def pending(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        plays = await asyncio.to_thread(gather_pending)
-        await interaction.followup.send(embed=build_pending_embed(plays), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
