@@ -63,7 +63,7 @@ class LoggedRow:
     odds: str | None
 
     def line(self) -> str:
-        bits = [self.sport_emoji, self.selection]
+        bits = [f"{self.sport_emoji} {self.selection}"]
         if self.stake is not None:
             bits.append(f"{self.stake:g}u")
         if self.odds:
