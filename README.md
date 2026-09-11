@@ -10,6 +10,7 @@ All commands are owner-only and reply privately unless they post to the recap ch
 | --- | --- |
 | `/recap [date] [preview]` | Posts the daily recap. Syncs the sheet first, so it's always current. `date` autocompletes to dates that actually have plays and accepts `2026-08-19`, `8/19/2026`, `8/19/26`, etc.; blank = today (Eastern). `preview: True` shows it only to you first. |
 | `/stats [period] [capper] [post]` | Record, units, and ROI for today / last 7 days / month / year / all-time, with a per-capper leaderboard. `capper` autocompletes from names in the sheet and narrows to one person; `post: True` shares it in the recap channel. |
+| `/sync` | Pulls the latest sheet data into MongoDB on demand. |
 
 ## Posting a bet
 
@@ -23,7 +24,6 @@ back from vacation, time to lock in
 The bot replaces your message with one clean block: a short first line becomes the quoted headline, the rest is the write-up, units go in their own field, and up to 4 screenshots are grouped into a single gallery. Every post pings **@Premium** (change the role with `PING_ROLE`). Only the owner's messages are picked up.
 
 The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to remove your original) in the channel, and the Premium role must be mentionable or the bot needs Mention Everyone.
-| `/sync` | Pulls the latest sheet data into MongoDB on demand. |
 
 ## Features
 
