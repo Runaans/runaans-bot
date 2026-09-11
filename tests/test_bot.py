@@ -518,21 +518,31 @@ PLAYBOOK_ID = config.PLAYBOOK_BOT_ID
 
 
 def fake_playbook_reply(original_id, log, url="https://links.playbook.actionnetwork.com/nSNdo",
-                        label="Find your DraftKings betslip at Playbook"):
-    """Playbook AI's reply as fetched over REST: a link button, replying to the original."""
+                        label="Find your DraftKings betslip at Playbook", description=None):
+    """Playbook AI's reply as fetched over REST, replying to the original.
+
+    With `url` it carries the link button; with url=None and a `description`
+    it's the placeholder or the "not available" message."""
 
     async def delete():
         log.append(("delete_playbook", None))
+
+    buttons = [types.SimpleNamespace(label=label, url=url)] if url else []
+    embeds = [types.SimpleNamespace(description=description)] if description else []
 
     return types.SimpleNamespace(
         id=777,
         author=types.SimpleNamespace(id=PLAYBOOK_ID, bot=True),
         channel=types.SimpleNamespace(id=1),
         reference=types.SimpleNamespace(message_id=original_id),
-        components=[types.SimpleNamespace(children=[types.SimpleNamespace(label=label, url=url)])],
-        embeds=[],
+        components=[types.SimpleNamespace(children=buttons)] if buttons else [],
+        embeds=embeds,
         delete=delete,
     )
+
+
+PLAYBOOK_NO_MATCH = ("Those selections are not yet available in our system. Stay tuned as we "
+                     "continue expanding. Learn more about Playbook [here](https://playbookbot.com).")
 
 
 def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=None,
@@ -546,9 +556,11 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
     log = []
     bot_user = types.SimpleNamespace(id=999)
 
-    # Playbook's reply records its deletion into this same log
+    # Playbook's reply records its deletion into this same log. A list means
+    # successive states of the reply: what wait_for sees, then each re-fetch.
     if callable(playbook):
         playbook = playbook(log)
+    states = list(playbook) if isinstance(playbook, list) else [playbook]
 
     async def channel_send(**kw):
         log.append(("send", kw))
@@ -557,7 +569,9 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
 
     async def fetch_message(message_id):
         log.append(("fetch", message_id))
-        return playbook
+        if len(states) > 1:
+            states.pop(0)
+        return states[0]
 
     async def reply(text, **kw):
         log.append(("reply", text))
@@ -588,10 +602,10 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
 
     async def wait_for(event, *, check, timeout):
         log.append(("wait", timeout))
-        if playbook is None:
+        if states[0] is None:
             raise asyncio.TimeoutError
-        assert check(playbook), "listener's check rejected Playbook's own reply"
-        return playbook
+        assert check(states[0]), "listener's check rejected Playbook's own reply"
+        return states[0]
 
     bot = types.SimpleNamespace(user=bot_user, wait_for=wait_for)
     return msg, bot, log
@@ -636,6 +650,54 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
         names = [name for name, _ in log]
         self.assertEqual(names, ["wait", "send", "delete"])
         self.assertNotIn("view", log[1][1])
+
+    async def test_playbook_placeholder_is_polled_until_link_appears(self):
+        """Playbook replies instantly with a placeholder and edits the link in later."""
+        from cogs import bets
+
+        def states(log):
+            return [
+                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
+                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
+                fake_playbook_reply(123, log),  # link edited in
+            ]
+
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=states)
+        original_poll = bets.PLAYBOOK_POLL_SECONDS
+        bets.PLAYBOOK_POLL_SECONDS = 0
+        try:
+            await self.cog(bot).on_message(msg)
+        finally:
+            bets.PLAYBOOK_POLL_SECONDS = original_poll
+
+        names = [name for name, _ in log]
+        self.assertEqual(names.count("fetch"), 2)  # kept re-fetching until the link showed
+        self.assertEqual(names[-3:], ["send", "delete", "delete_playbook"])
+        sent = next(kw for name, kw in log if name == "send")
+        self.assertEqual(sent["view"].children[0].url, "https://links.playbook.actionnetwork.com/nSNdo")
+
+    async def test_playbook_giving_up_stops_polling_and_posts_without_button(self):
+        from cogs import bets
+
+        def states(log):
+            return [
+                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
+                fake_playbook_reply(123, log, url=None, description=PLAYBOOK_NO_MATCH),
+            ]
+
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=states)
+        original_poll = bets.PLAYBOOK_POLL_SECONDS
+        bets.PLAYBOOK_POLL_SECONDS = 0
+        try:
+            await self.cog(bot).on_message(msg)
+        finally:
+            bets.PLAYBOOK_POLL_SECONDS = original_poll
+
+        names = [name for name, _ in log]
+        self.assertEqual(names.count("fetch"), 1)  # gave up as soon as Playbook did
+        sent = next(kw for name, kw in log if name == "send")
+        self.assertNotIn("view", sent)
+        self.assertIn("delete_playbook", names)  # its "not available" card is cleaned up too
 
 
     async def test_posts_pings_premium_then_deletes_original(self):
@@ -714,6 +776,17 @@ class TestPlaybookParsing(unittest.TestCase):
                          {"url": "https://links.playbook.actionnetwork.com/zQMgh", "book": None})
 
         self.assertIsNone(extract_betslip(types.SimpleNamespace(components=[], embeds=[])))
+
+    def test_not_available_message_is_not_a_betslip_link(self):
+        from cogs.bets import extract_betslip, playbook_gave_up
+
+        reply = fake_playbook_reply(1, [], url=None, description=PLAYBOOK_NO_MATCH)
+        # It links to playbookbot.com, which is not a betslip
+        self.assertIsNone(extract_betslip(reply))
+        self.assertTrue(playbook_gave_up(reply))
+
+        placeholder = fake_playbook_reply(1, [], url=None, description="Working on your betslip...")
+        self.assertIsNone(playbook_gave_up(placeholder))
 
 
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):

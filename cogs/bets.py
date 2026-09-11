@@ -43,6 +43,10 @@ HEADLINE_MAX = 60
 
 # Playbook's button reads "Find your DraftKings betslip at Playbook"
 PLAYBOOK_LABEL_RE = re.compile(r"find your (.+?) betslip", re.IGNORECASE)
+
+# Playbook answers within a fraction of a second with a placeholder, then
+# edits the real betslip in a few seconds later. Re-fetch at this interval.
+PLAYBOOK_POLL_SECONDS = 1.5
 URL_RE = re.compile(r"https?://\S+")
 
 
@@ -94,10 +98,21 @@ def slip_filename(index: int, original: str) -> str:
     return f"slip{index}{ext if ext in IMAGE_EXTENSIONS else '.png'}"
 
 
+# Playbook's real betslip links live here; its "not available" message links
+# to playbookbot.com instead, which must not be mistaken for a betslip
+BETSLIP_URL_RE = re.compile(r"https://links\.playbook\.actionnetwork\.com/\S+")
+
+# How Playbook's reply reads when it couldn't match the bet
+PLAYBOOK_NO_MATCH_RE = re.compile(
+    r"not (?:yet )?available|couldn't find|could not find|no match|0 of \d+|unable to",
+    re.IGNORECASE,
+)
+
+
 def extract_betslip(message) -> dict | None:
     """Find the betslip link (and book name) in a Playbook reply.
 
-    Prefers the link button; falls back to a URL in the embed text.
+    Prefers the link button; falls back to a betslip URL in the embed text.
     """
     for row in getattr(message, "components", None) or []:
         for comp in getattr(row, "children", None) or []:
@@ -108,9 +123,19 @@ def extract_betslip(message) -> dict | None:
                 return {"url": url, "book": m.group(1) if m else None}
 
     for embed in getattr(message, "embeds", None) or []:
-        m = URL_RE.search(embed.description or "")
+        m = BETSLIP_URL_RE.search(embed.description or "")
         if m:
             return {"url": m.group(0).rstrip(")>."), "book": None}
+
+    return None
+
+
+def playbook_gave_up(message) -> str | None:
+    """The text of Playbook's reply if it says it couldn't match the bet."""
+    for embed in getattr(message, "embeds", None) or []:
+        text = embed.description or ""
+        if PLAYBOOK_NO_MATCH_RE.search(text):
+            return text
 
     return None
 
@@ -247,10 +272,34 @@ class BetsCog(commands.Cog):
             return None
 
         log.info("Playbook replied after %.1fs", time.monotonic() - started)
-        try:
-            return await original.channel.fetch_message(reply.id)
-        except discord.HTTPException:
-            return reply
+
+        # That first reply is usually a placeholder; keep re-fetching until
+        # the betslip link has been edited in, or the wait budget runs out
+        deadline = started + PLAYBOOK_WAIT_SECONDS
+        latest = reply
+        while True:
+            try:
+                latest = await original.channel.fetch_message(reply.id)
+            except discord.NotFound:
+                log.warning("Playbook removed its own reply")
+                return None
+            except discord.HTTPException:
+                log.warning("Couldn't re-fetch Playbook's reply", exc_info=True)
+
+            if extract_betslip(latest):
+                log.info("Playbook link ready after %.1fs", time.monotonic() - started)
+                return latest
+
+            gave_up = playbook_gave_up(latest)
+            if gave_up:
+                log.warning("Playbook couldn't match this bet, no link: %s", gave_up[:160])
+                return latest
+
+            if time.monotonic() >= deadline:
+                log.warning("Playbook never added a betslip link within %ss", PLAYBOOK_WAIT_SECONDS)
+                return latest
+
+            await asyncio.sleep(PLAYBOOK_POLL_SECONDS)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
