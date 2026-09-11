@@ -108,8 +108,8 @@ class SyncCog(commands.Cog):
     async def before_auto_sync(self):
         await self.bot.wait_until_ready()
 
-    # A crashed loop would otherwise stay dead while /status still showed a
-    # stale-but-successful last sync
+    # A crashed loop would otherwise stay dead, silently leaving recaps on
+    # stale data
     @auto_sync.error
     async def auto_sync_error(self, error: BaseException):
         log.error("Auto-sync loop crashed, restarting it", exc_info=error)
