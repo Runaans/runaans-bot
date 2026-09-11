@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 import discord
@@ -29,6 +30,7 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 # "1u", "0.25 u", ".5U", "2 units"
 UNITS_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*u(?:nits?)?\b", re.IGNORECASE)
 MENTION_RE = re.compile(r"<@!?\d+>")
+MENTION_ID_RE = re.compile(r"<@!?(\d+)>")
 
 # The sportsbook name typed after @Playbook is for Playbook, not the note
 BOOK_WORDS = (
@@ -44,19 +46,24 @@ PLAYBOOK_LABEL_RE = re.compile(r"find your (.+?) betslip", re.IGNORECASE)
 URL_RE = re.compile(r"https?://\S+")
 
 
-def parse_post(text: str, playbook_id: int | None = None) -> dict:
+def parse_post(text: str, playbook_ids=()) -> dict:
     """Pull units out of a normal message and split it into headline + note.
 
         @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
         back from vacation, time to lock in
 
     -> units ["0.25U"], headline "FD 50% Boost Stimmy", note "back from ..."
+
+    `playbook_ids` are the Playbook bot user ids; the sportsbook word typed
+    right after a Playbook mention is dropped along with the mention.
     """
     text = text or ""
 
-    if playbook_id:
+    if isinstance(playbook_ids, int):
+        playbook_ids = [playbook_ids]
+    for pid in playbook_ids:
         text = re.sub(
-            rf"<@!?{playbook_id}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
+            rf"<@!?{pid}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
         )
     text = MENTION_RE.sub("", text)
 
@@ -174,6 +181,45 @@ class BetsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.warned_missing_role = False
+        # Seeded from config; any other bot named "Playbook" in the server is
+        # added at startup so a tag on either counts
+        self.playbook_ids = {PLAYBOOK_BOT_ID} if PLAYBOOK_BOT_ID else set()
+        self._resolve_task = None
+
+    async def cog_load(self):
+        self._resolve_task = asyncio.create_task(self._resolve_playbook_ids())
+
+    async def cog_unload(self):
+        if self._resolve_task:
+            self._resolve_task.cancel()
+
+    async def _resolve_playbook_ids(self):
+        try:
+            await self.bot.wait_until_ready()
+        except RuntimeError:
+            return  # bot never logged in (tests)
+
+        for guild in self.bot.guilds:
+            route = discord.http.Route(
+                "GET", "/guilds/{guild_id}/members/search", guild_id=guild.id
+            )
+            try:
+                found = await self.bot.http.request(route, params={"query": "playbook", "limit": 20})
+            except discord.HTTPException:
+                log.warning("Couldn't search %s for Playbook bots", guild, exc_info=True)
+                continue
+
+            for member in found:
+                user = member.get("user", {})
+                if user.get("bot"):
+                    self.playbook_ids.add(int(user["id"]))
+
+        log.info("Playbook bot ids: %s", sorted(self.playbook_ids))
+
+    def _tagged_playbook(self, message: discord.Message) -> bool:
+        ids = {u.id for u in message.mentions}
+        ids |= {int(i) for i in MENTION_ID_RE.findall(message.content or "")}
+        return bool(ids & self.playbook_ids)
 
     def _ping_role(self, guild: discord.Guild) -> discord.Role | None:
         return discord.utils.find(
@@ -187,18 +233,20 @@ class BetsCog(commands.Cog):
 
         def is_reply(m: discord.Message) -> bool:
             return (
-                m.author.id == PLAYBOOK_BOT_ID
+                m.author.id in self.playbook_ids
                 and m.channel.id == original.channel.id
                 and m.reference is not None
                 and m.reference.message_id == original.id
             )
 
+        started = time.monotonic()
         try:
             reply = await self.bot.wait_for("message", check=is_reply, timeout=PLAYBOOK_WAIT_SECONDS)
         except asyncio.TimeoutError:
             log.warning("Playbook didn't reply within %ss - posting without a link", PLAYBOOK_WAIT_SECONDS)
             return None
 
+        log.info("Playbook replied after %.1fs", time.monotonic() - started)
         try:
             return await original.channel.fetch_message(reply.id)
         except discord.HTTPException:
@@ -223,16 +271,28 @@ class BetsCog(commands.Cog):
             )
             return
 
-        parsed = parse_post(message.content, PLAYBOOK_BOT_ID)
+        parsed = parse_post(message.content, self.playbook_ids)
+
+        tagged = self._tagged_playbook(message)
+        log.info(
+            "Bet post from %s in #%s: %d slip(s), playbook tagged=%s, mentions=%s",
+            message.author, message.channel, len(slips), tagged,
+            [u.id for u in message.mentions],
+        )
+        if not tagged and "playbook" in (message.content or "").lower():
+            log.warning(
+                "Message says 'playbook' but no Playbook bot was mentioned "
+                "(known Playbook ids: %s)", sorted(self.playbook_ids),
+            )
 
         # If Playbook was tagged too, borrow its betslip link for the button
         playbook_msg = None
-        if PLAYBOOK_BOT_ID and PLAYBOOK_WAIT_SECONDS and any(
-            u.id == PLAYBOOK_BOT_ID for u in message.mentions
-        ):
+        if tagged and PLAYBOOK_WAIT_SECONDS:
             playbook_msg = await self._wait_for_playbook(message)
 
         betslip = extract_betslip(playbook_msg) if playbook_msg else None
+        if playbook_msg is not None:
+            log.info("Playbook betslip link: %s", betslip["url"] if betslip else None)
 
         # Re-upload the screenshots with the new post so they survive the
         # original message being deleted
