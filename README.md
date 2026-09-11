@@ -25,6 +25,12 @@ The bot replaces your message with one clean block: a short first line becomes t
 
 If @Playbook is tagged too, the bot waits for Playbook's reply (up to `PLAYBOOK_WAIT_SECONDS`), puts its betslip link on a **Place this bet at DraftKings** button under the block, and deletes Playbook's card along with your original. The sportsbook word after @Playbook is left out of the note. If Playbook doesn't answer in time, the post goes up without the button.
 
+### Logging to the sheet automatically
+
+After the post goes up, the bot reads each slip screenshot with Claude and adds a row to `TOKEN PICKS` — Date, sport emoji, Selection, Stake, Odds, and your note — with **Win left blank** so the play stays pending until you grade it. It then DMs you what it logged with an **Undo** button, and re-syncs so `/recap` sees the play immediately. Units typed in the post are matched to slips in order (`0.15u 0.1u` with two screenshots pairs them).
+
+This needs an Anthropic API key in `.env` (`ANTHROPIC_API_KEY=sk-ant-...`, from [console.anthropic.com](https://console.anthropic.com)); without one the bot posts normally and DMs you a reminder once. Set `SHEET_LOG_ENABLED=0` to turn it off.
+
 The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to remove your original) in the channel, and the Premium role must be mentionable or the bot needs Mention Everyone.
 
 ## Features
@@ -70,6 +76,8 @@ The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to 
    | `PING_ROLE` | no | Role name every bet post pings (default `Premium`) |
    | `PLAYBOOK_BOT_ID` | no | Playbook AI's bot user ID, whose betslip link is borrowed (`0` disables) |
    | `PLAYBOOK_WAIT_SECONDS` | no | How long to wait for Playbook's reply (default `30`) |
+   | `ANTHROPIC_API_KEY` | for sheet logging | Claude API key used to read slip screenshots |
+   | `SHEET_LOG_ENABLED` | no | `0` to stop adding posted bets to the sheet (default on) |
 
 3. Run the bot:
 

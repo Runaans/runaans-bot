@@ -23,6 +23,8 @@ FAKE_ENV = {
     "SPREADSHEET_ID": "fake-sheet-id",
     "AUTO_SYNC_MINUTES": "10",
     "AUTO_RECAP_TIME": "23:30",
+    # The listener tests exercise sheet logging directly, not via the post
+    "SHEET_LOG_ENABLED": "0",
 }
 for key, value in FAKE_ENV.items():
     os.environ[key] = value
@@ -787,6 +789,213 @@ class TestPlaybookParsing(unittest.TestCase):
 
         placeholder = fake_playbook_reply(1, [], url=None, description="Working on your betslip...")
         self.assertIsNone(playbook_gave_up(placeholder))
+
+
+class TestBetLogger(unittest.TestCase):
+    def test_pair_units(self):
+        from bet_logger import pair_units
+
+        self.assertEqual(pair_units(["0.15U", "0.1U"], 2), [0.15, 0.1])
+        self.assertEqual(pair_units(["1U"], 3), [1.0, 1.0, 1.0])
+        self.assertEqual(pair_units(["1U", "2U"], 3), [1.0, 1.0, 1.0])
+        self.assertEqual(pair_units([], 2), [None, None])
+
+    def test_odds_number_matches_sheet_convention(self):
+        from bet_logger import odds_number
+
+        self.assertEqual(odds_number("+716"), 716)
+        self.assertEqual(odds_number("-115"), -115)
+        self.assertEqual(odds_number("137"), 137)
+        self.assertEqual(odds_number(None), "")
+        self.assertEqual(odds_number("1.91"), "")  # decimal odds aren't logged
+
+    def test_build_rows(self):
+        from bet_logger import SlipRead, build_rows
+
+        reads = [
+            SlipRead(is_betslip=True, selection="Kyren Williams Over 53.5 Rush Yds",
+                     odds="-115", sport="football", legs=1),
+            SlipRead(is_betslip=False, selection="", odds=None, sport="other", legs=0),
+            SlipRead(is_betslip=True, selection="Spain GK 4+ Saves", odds=None,
+                     sport="soccer", legs=1),
+            SlipRead(is_betslip=True, selection="Leafs ML", odds="+120", sport="hockey", legs=1),
+        ]
+        rows = build_rows(reads, [0.25, None, 1.0, 0.5], "FD 50% Boost", "9/11/2026")
+
+        # The non-slip image is skipped; sports map to the dropdown's values
+        self.assertEqual(
+            [r["a_to_e"] for r in rows],
+            [
+                ["9/11/2026", "\U0001f3c8", "Kyren Williams Over 53.5 Rush Yds", 0.25, -115],
+                ["9/11/2026", "⚽", "Spain GK 4+ Saves", 1.0, ""],
+                ["9/11/2026", "Other", "Leafs ML", 0.5, 120],
+            ],
+        )
+        self.assertEqual([r["note"] for r in rows], ["FD 50% Boost"] * 3)
+
+    def test_log_bets_writes_only_a_to_e_and_k(self):
+        import bet_logger
+        from bet_logger import SlipRead, build_rows
+
+        calls = []
+
+        class FakeWorksheet:
+            def col_values(self, col):
+                return ["", "", "9/10/2026", "9/10/2026", "", ""]  # last date in row 4
+
+            def update(self, *, range_name, values, value_input_option=None):
+                calls.append(("update", range_name, values, value_input_option))
+
+            def batch_clear(self, ranges):
+                calls.append(("clear", ranges))
+
+        rows = build_rows(
+            [SlipRead(is_betslip=True, selection="Kane SOA", odds="+250", sport="soccer", legs=1)],
+            [1.0], "", "9/11/2026",
+        )
+        original = bet_logger._worksheet
+        bet_logger._worksheet = lambda: FakeWorksheet()
+        try:
+            logged = bet_logger.log_bets(rows)
+            bet_logger.clear_rows([r.row for r in logged])
+        finally:
+            bet_logger._worksheet = original
+
+        self.assertEqual(logged[0].row, 5)
+        self.assertEqual(logged[0].line(), "row 5 - ⚽ Kane SOA · 1u · +250")
+        self.assertEqual(
+            calls,
+            [
+                ("update", "A5:E5", [["9/11/2026", "⚽", "Kane SOA", 1.0, 250]], "USER_ENTERED"),
+                ("clear", ["A5:E5", "K5"]),
+            ],
+        )
+
+    def test_read_slip_uses_structured_output_and_handles_refusal(self):
+        import bet_logger
+        from bet_logger import SlipRead
+
+        seen = {}
+
+        class FakeMessages:
+            def parse(self, **kw):
+                seen.update(kw)
+                return types.SimpleNamespace(
+                    stop_reason="end_turn",
+                    parsed_output=SlipRead(is_betslip=True, selection="Kane SOA", odds="+250",
+                                           sport="soccer", legs=1),
+                )
+
+        original = bet_logger._get_client
+        bet_logger._get_client = lambda: types.SimpleNamespace(messages=FakeMessages())
+        try:
+            read = bet_logger.read_slip(b"\x89PNG", "image/png")
+        finally:
+            bet_logger._get_client = original
+
+        self.assertEqual(read.selection, "Kane SOA")
+        self.assertEqual(seen["model"], "claude-opus-5")
+        self.assertIs(seen["output_format"], SlipRead)
+        image = seen["messages"][0]["content"][0]
+        self.assertEqual(image["source"]["media_type"], "image/png")
+        self.assertEqual(image["source"]["data"], "iVBORw==")  # base64 of the bytes
+
+        class Refusing:
+            def parse(self, **kw):
+                return types.SimpleNamespace(stop_reason="refusal", stop_details=None, parsed_output=None)
+
+        bet_logger._get_client = lambda: types.SimpleNamespace(messages=Refusing())
+        try:
+            self.assertIsNone(bet_logger.read_slip(b"x", "image/png"))
+        finally:
+            bet_logger._get_client = original
+
+
+class TestSheetLoggingFlow(unittest.IsolatedAsyncioTestCase):
+    """The cog's end-to-end logging step with Claude and the sheet faked."""
+
+    def setUp(self):
+        import bet_logger
+        self.bet_logger = bet_logger
+        self.saved = (bet_logger.available, bet_logger.read_slips, bet_logger.log_bets)
+
+    def tearDown(self):
+        (self.bet_logger.available, self.bet_logger.read_slips,
+         self.bet_logger.log_bets) = self.saved
+
+    def owner(self):
+        dms = []
+
+        async def send(text, **kw):
+            dms.append((text, kw))
+
+        return types.SimpleNamespace(id=111, send=send), dms
+
+    async def test_logs_and_dms_with_undo(self):
+        from cogs import bets
+        from bet_logger import SlipRead, LoggedRow
+
+        self.bet_logger.available = lambda: True
+        self.bet_logger.read_slips = lambda payloads: [
+            SlipRead(is_betslip=True, selection="Kane SOA", odds="+250", sport="soccer", legs=1)
+        ]
+        written = {}
+
+        def fake_log(rows):
+            written["rows"] = rows
+            return [LoggedRow(1387, "⚽", "Kane SOA", 1.0, "+250")]
+
+        self.bet_logger.log_bets = fake_log
+        synced = []
+        original_sync = bets.sync_sheet
+        bets.sync_sheet = lambda: synced.append(True)
+
+        owner, dms = self.owner()
+        cog = bets.BetsCog(types.SimpleNamespace(user=types.SimpleNamespace(id=999)))
+        try:
+            await cog._log_to_sheet(owner, [(b"img", "image/png")],
+                                    {"units": ["1U"], "headline": "Kane SOA", "note": "lock"})
+        finally:
+            bets.sync_sheet = original_sync
+
+        self.assertEqual(written["rows"][0]["a_to_e"][2:], ["Kane SOA", 1.0, 250])
+        self.assertEqual(written["rows"][0]["note"], "Kane SOA - lock")
+        self.assertEqual(len(dms), 1)
+        text, kw = dms[0]
+        self.assertIn("row 1387", text)
+        self.assertIsInstance(kw["view"], bets.UndoLogView)
+        self.assertEqual(kw["view"].rows, [1387])
+        self.assertEqual(synced, [True])  # /recap sees it right away
+
+    async def test_without_api_key_dms_setup_hint_once(self):
+        from cogs import bets
+
+        self.bet_logger.available = lambda: False
+        owner, dms = self.owner()
+        cog = bets.BetsCog(types.SimpleNamespace(user=types.SimpleNamespace(id=999)))
+
+        await cog._log_to_sheet(owner, [(b"img", "image/png")], {"units": [], "headline": None, "note": None})
+        await cog._log_to_sheet(owner, [(b"img", "image/png")], {"units": [], "headline": None, "note": None})
+
+        self.assertEqual(len(dms), 1)
+        self.assertIn("ANTHROPIC_API_KEY", dms[0][0])
+
+    async def test_unreadable_slip_asks_to_log_by_hand(self):
+        from cogs import bets
+
+        self.bet_logger.available = lambda: True
+
+        def boom(payloads):
+            raise RuntimeError("api down")
+
+        self.bet_logger.read_slips = boom
+        owner, dms = self.owner()
+        cog = bets.BetsCog(types.SimpleNamespace(user=types.SimpleNamespace(id=999)))
+
+        await cog._log_to_sheet(owner, [(b"img", "image/png")], {"units": ["1U"], "headline": None, "note": None})
+
+        self.assertEqual(len(dms), 1)
+        self.assertIn("by hand", dms[0][0])
 
 
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
