@@ -13,8 +13,6 @@ from config import (
     RECAP_CHANNEL,
     BRAND,
     PURPLE,
-    GREEN,
-    RED,
     EASTERN,
     AUTO_RECAP_ENABLED,
     AUTO_RECAP_TIME,
@@ -35,8 +33,8 @@ log = logging.getLogger("runaans.recap")
 # Makes sure recaps only come from the google sheet
 SOURCE_FILTER = SHEET_FILTER
 
-# Discord embed limits
-DESCRIPTION_LIMIT = 4096
+# Discord embed field value limit
+FIELD_LIMIT = 1024
 
 
 def clean_result(value):
@@ -146,7 +144,6 @@ def build_recap_embed(data: dict) -> discord.Embed:
     target_date = data["target_date"]
 
     total_profit = 0.0
-    wins = losses = pushes = pending = 0
     rows = []
 
     # Loop through each play
@@ -157,7 +154,6 @@ def build_recap_embed(data: dict) -> discord.Embed:
 
         # If invalid result, it is pending
         if result not in VALID_RESULTS:
-            pending += 1
             rows.append(f"⏳ {title}")
             continue
 
@@ -166,25 +162,21 @@ def build_recap_embed(data: dict) -> discord.Embed:
         profit_str = fmt(profit)
 
         if result == "W":
-            wins += 1
             rows.append(f"✅ {title} {profit_str}")
         elif result == "L":
-            losses += 1
             rows.append(f"❌ {title} {profit_str}")
         else:
-            pushes += 1
             rows.append(f"➖ {title} {profit_str}")
 
     # Date Formatting
     dt = datetime.strptime(target_date, "%Y-%m-%d")
     pretty_date = f"{dt.month}/{dt.day}/{dt.year}"
-    weekday = dt.strftime("%a")
 
-    # Combine plays, staying under Discord's description limit
+    # Combines all plays into one block, staying under the field limit
     plays_text = "\n".join(rows) if rows else "No settled plays."
 
-    if len(plays_text) > DESCRIPTION_LIMIT:
-        budget = DESCRIPTION_LIMIT - 40
+    if len(plays_text) > FIELD_LIMIT:
+        budget = FIELD_LIMIT - 40
         kept = []
         used = 0
 
@@ -201,40 +193,23 @@ def build_recap_embed(data: dict) -> discord.Embed:
 
         plays_text = "\n".join(kept) + f"\n… and {len(rows) - len(kept)} more plays"
 
-    # Daily record, e.g. 3-2 or 3-2-1 when there are pushes
-    record = f"{wins}-{losses}"
-    if pushes:
-        record += f"-{pushes}"
-
-    day_line = f"**{pretty_date}: {fmt(total_profit)} ({record})**"
-    if pending:
-        day_line += f"\n⏳ {pending} pending"
-
     # Builds the total section
     totals_text = (
-        f"{day_line}\n"
+        f"**{pretty_date}: {fmt(total_profit)}**\n"
         f"**THIS MONTH: {fmt(data['month_total'])}**\n"
         f"**YEARLY: {fmt(data['yearly_total'])}**\n"
         f"**ALL-TIME: {fmt(data['alltime_total'])}**"
     )
 
-    # Green on a winning day, red on a losing day, purple otherwise
-    settled = wins + losses + pushes
-    if settled and total_profit > 0:
-        color = GREEN
-    elif settled and total_profit < 0:
-        color = RED
-    else:
-        color = PURPLE
-
     embed = discord.Embed(
-        title=f"{BRAND} · {weekday} {pretty_date} Recap",
-        description=plays_text,
-        color=color,
+        title=f"RunaansLocks {pretty_date} Recap",
+        color=PURPLE,
         timestamp=datetime.now(EASTERN),
     )
 
-    embed.add_field(name="📊 Totals", value=totals_text, inline=False)
+    # Blank field names give the spacing between title, plays and totals
+    embed.add_field(name="\u200b", value=plays_text, inline=False)
+    embed.add_field(name="\u200b", value=totals_text, inline=False)
     embed.set_footer(text=BRAND)
 
     return embed

@@ -130,30 +130,30 @@ class TestRecapEmbed(unittest.TestCase):
             month=12.34, year=-5.0, alltime=100.0,
         )
         embed = recap.build_recap_embed(data)
-        totals = embed.fields[0].value
+        plays, totals = embed.fields[0].value, embed.fields[1].value
 
-        # Title carries the brand and the weekday; 2026-08-19 is a Wednesday
-        self.assertEqual(embed.title, "Runaans Locks · Wed 8/19/2026 Recap")
-        self.assertEqual(embed.fields[0].name, "📊 Totals")
-        self.assertIn("✅ Lakers ML +1.50u", embed.description)
-        self.assertIn("❌ Jets +3.5 -1.00u", embed.description)
-        self.assertIn("➖ Over 8.5 +0.00u", embed.description)
-        self.assertIn("⏳ Parlay", embed.description)
-        self.assertIn("8/19/2026: +0.50u", totals)
-        self.assertIn("(1-1-1)", totals)
-        self.assertIn("1 pending", totals)
-        self.assertIn("THIS MONTH: +12.34u", totals)
-        self.assertIn("YEARLY: -5.00u", totals)
-        self.assertEqual(embed.color, recap.GREEN)
+        # Original layout: plain title, two blank-named fields, purple bar
+        self.assertEqual(embed.title, "RunaansLocks 8/19/2026 Recap")
+        self.assertEqual([f.name for f in embed.fields], ["\u200b", "\u200b"])
+        self.assertIsNone(embed.description)
+        self.assertEqual(embed.footer.text, "Runaans Locks")
 
-    def test_losing_day_is_red(self):
-        embed = recap.build_recap_embed(recap_data([play("A", "L", -2.0)]))
-        self.assertEqual(embed.color, recap.RED)
+        self.assertIn("✅ Lakers ML +1.50u", plays)
+        self.assertIn("❌ Jets +3.5 -1.00u", plays)
+        self.assertIn("➖ Over 8.5 +0.00u", plays)
+        self.assertIn("⏳ Parlay", plays)
+        self.assertEqual(
+            totals,
+            "**8/19/2026: +0.50u**\n"
+            "**THIS MONTH: +12.34u**\n"
+            "**YEARLY: -5.00u**\n"
+            "**ALL-TIME: +100.00u**",
+        )
 
-    def test_all_pending_is_purple(self):
-        embed = recap.build_recap_embed(recap_data([play("A", None, None)]))
-        self.assertEqual(embed.color, recap.PURPLE)
-        self.assertIn("(0-0)", embed.fields[0].value)
+    def test_always_purple(self):
+        for plays in ([play("A", "W", 2.0)], [play("A", "L", -2.0)], [play("A", None, None)]):
+            embed = recap.build_recap_embed(recap_data(plays))
+            self.assertEqual(embed.color, recap.PURPLE)
 
     def test_many_plays_stay_under_discord_limits(self):
         plays = [
@@ -162,15 +162,14 @@ class TestRecapEmbed(unittest.TestCase):
         ]
         embed = recap.build_recap_embed(recap_data(plays))
 
-        self.assertLessEqual(len(embed.description), 4096)
-        self.assertIn("more plays", embed.description)
+        # A field value is capped at 1024 characters by Discord
+        self.assertLessEqual(len(embed.fields[0].value), 1024)
+        self.assertIn("more plays", embed.fields[0].value)
         # Totals still count every play, not just the displayed ones
-        self.assertIn("+300.00u", embed.fields[0].value)
-        self.assertIn("(300-0)", embed.fields[0].value)
+        self.assertIn("+300.00u", embed.fields[1].value)
 
         total_len = (
             len(embed.title)
-            + len(embed.description)
             + sum(len(f.name) + len(f.value) for f in embed.fields)
             + len(embed.footer.text)
         )
@@ -196,10 +195,10 @@ class TestTruncation(unittest.TestCase):
         ]
         embed = recap.build_recap_embed(recap_data(plays))
 
-        self.assertLessEqual(len(embed.description), 4096)
+        self.assertLessEqual(len(embed.fields[0].value), 1024)
         # The monster line is trimmed, not allowed to swallow everything
-        self.assertIn("…", embed.description)
-        self.assertIn("+6.00u", embed.fields[0].value)
+        self.assertIn("…", embed.fields[0].value)
+        self.assertIn("+6.00u", embed.fields[1].value)
 
 
 class TestSyncStats(unittest.TestCase):
