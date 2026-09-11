@@ -82,13 +82,16 @@ def build_bet_embeds(
     if note:
         description.append(note)
 
+    # No title on purpose: the URL is needed for gallery grouping, and a
+    # title would render as a blue link. The brand goes in the author line,
+    # which shows as plain white text.
     embed = discord.Embed(
-        title=BRAND,
         url=BRAND_URL,
         description="\n\n".join(description)[:4096] or None,
         color=PURPLE,
         timestamp=datetime.now(EASTERN),
     )
+    embed.set_author(name=BRAND)
 
     if units:
         embed.add_field(name="Units", value="\n".join(units), inline=True)

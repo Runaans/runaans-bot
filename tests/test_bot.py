@@ -467,7 +467,11 @@ class TestBetEmbeds(unittest.TestCase):
 
         self.assertEqual(len(embeds), 1)
         embed = embeds[0]
-        self.assertEqual(embed.title, "Runaans Locks")
+        # Brand goes in the author line (plain white). A title would render as
+        # a blue link because the embed URL is set for gallery grouping.
+        self.assertEqual(embed.author.name, "Runaans Locks")
+        self.assertIsNone(embed.title)
+        self.assertEqual(embed.url, "https://runaanslocks.com")
         self.assertEqual(
             embed.description, "> FD 50% Boost Stimmy\n\nback from vacation, time to lock in"
         )
