@@ -10,7 +10,19 @@ All commands are owner-only and reply privately unless they post to the recap ch
 | --- | --- |
 | `/recap [date] [preview]` | Posts the daily recap. Syncs the sheet first, so it's always current. `date` autocompletes to dates that actually have plays and accepts `2026-08-19`, `8/19/2026`, `8/19/26`, etc.; blank = today (Eastern). `preview: True` shows it only to you first. |
 | `/stats [period] [capper] [post]` | Record, units, and ROI for today / last 7 days / month / year / all-time, with a per-capper leaderboard. `capper` autocompletes from names in the sheet and narrows to one person; `post: True` shares it in the recap channel. |
-| `/bet slip units [headline] [note] [odds] [book] [ping] [link] [slip2-4] [preview]` | Posts a play in the current channel as one clean block: headline quote, write-up, Units/Odds/Book, and up to 4 slip screenshots grouped into a single gallery. `ping` notifies a role like @Premium (the role must be mentionable, or the bot needs Mention Everyone). `link` adds a "Bet this at …" button. `preview: True` shows it only to you first. |
+
+## Posting a bet
+
+Post like normal — paste or upload the slip screenshot(s), type the units and your note, and mention the bot instead of @Playbook:
+
+```
+@RunaansLocks 0.25u FD 50% Boost Stimmy
+back from vacation, time to lock in
+```
+
+The bot replaces your message with one clean block: a short first line becomes the quoted headline, the rest is the write-up, units go in their own field, and up to 4 screenshots are grouped into a single gallery. Every post pings **@Premium** (change the role with `PING_ROLE`). Only the owner's messages are picked up.
+
+The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to remove your original) in the channel, and the Premium role must be mentionable or the bot needs Mention Everyone.
 | `/sync` | Pulls the latest sheet data into MongoDB on demand. |
 
 ## Features
@@ -53,7 +65,8 @@ All commands are owner-only and reply privately unless they post to the recap ch
    | `AUTO_RECAP_TIME` | no | Daily auto-recap time in Eastern, `HH:MM` (default `23:00`) |
    | `SHEET_RETRIES` | no | Retries for a rate-limited Sheets read (default `3`) |
    | `BRAND` | no | Name in embed titles/footers (default `Runaans Locks`) |
-   | `BRAND_URL` | no | Where the title of `/bet` posts links (default `https://runaanslocks.com`) |
+   | `BRAND_URL` | no | Where the title of bet posts links (default `https://runaanslocks.com`) |
+   | `PING_ROLE` | no | Role name every bet post pings (default `Premium`) |
 
 3. Run the bot:
 

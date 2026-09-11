@@ -409,23 +409,58 @@ class TestSheetRetry(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
 
-class TestBetPost(unittest.TestCase):
-    def test_units_formatting(self):
-        from cogs.bets import format_units
+class TestBetParsing(unittest.TestCase):
+    def test_units_headline_and_note(self):
+        from cogs.bets import parse_post
 
-        self.assertEqual(format_units("1u"), "1U")
-        self.assertEqual(format_units("0.15u, 0.1U"), "0.15U\n0.1U")
-        self.assertEqual(format_units("2 units"), "2 units")  # kept as typed
+        parsed = parse_post(
+            "<@123> 0.25u FD 50% Boost Stimmy\nback from vacation, time to lock in"
+        )
+        self.assertEqual(
+            parsed,
+            {
+                "units": ["0.25U"],
+                "headline": "FD 50% Boost Stimmy",
+                "note": "back from vacation, time to lock in",
+            },
+        )
 
+    def test_multiple_units_and_single_line(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post("<@!123> 0.15u 0.1U  The Unc Stimmy - 365 is giving us a 100% boost")
+        self.assertEqual(parsed["units"], ["0.15U", "0.1U"])
+        self.assertIsNone(parsed["headline"])
+        self.assertEqual(parsed["note"], "The Unc Stimmy - 365 is giving us a 100% boost")
+
+    def test_long_first_line_is_not_a_headline(self):
+        from cogs.bets import parse_post
+
+        long_line = "x" * 61
+        parsed = parse_post(f"1u {long_line}\nsecond line")
+        self.assertIsNone(parsed["headline"])
+        self.assertEqual(parsed["note"], f"{long_line}\nsecond line")
+
+    def test_units_written_as_words(self):
+        from cogs.bets import parse_post
+
+        self.assertEqual(parse_post("2 units on this")["units"], ["2U"])
+        self.assertEqual(parse_post(".5 u lean")["units"], ["0.5U"])
+
+    def test_mention_only(self):
+        from cogs.bets import parse_post
+
+        self.assertEqual(parse_post("<@123>"), {"units": [], "headline": None, "note": None})
+
+
+class TestBetEmbeds(unittest.TestCase):
     def test_single_slip_block(self):
         from cogs.bets import build_bet_embeds
 
         embeds = build_bet_embeds(
-            units="0.25u",
+            units=["0.25U"],
             headline="FD 50% Boost Stimmy",
-            note="Back from vacation, time to lock in",
-            odds="+1021",
-            book="FanDuel",
+            note="back from vacation, time to lock in",
             image_names=["slip1.png"],
             author="Runaans",
         )
@@ -433,21 +468,24 @@ class TestBetPost(unittest.TestCase):
         self.assertEqual(len(embeds), 1)
         embed = embeds[0]
         self.assertEqual(embed.title, "Runaans Locks")
-        self.assertTrue(
-            embed.description.startswith("> FD 50% Boost Stimmy\n\nBack from vacation")
-        )
         self.assertEqual(
-            [(f.name, f.value) for f in embed.fields],
-            [("Units", "0.25U"), ("Odds", "+1021"), ("Book", "FanDuel")],
+            embed.description, "> FD 50% Boost Stimmy\n\nback from vacation, time to lock in"
         )
+        self.assertEqual([(f.name, f.value) for f in embed.fields], [("Units", "0.25U")])
         self.assertEqual(embed.image.url, "attachment://slip1.png")
         self.assertEqual(embed.footer.text, "Runaans")
+
+    def test_no_units_means_no_units_field(self):
+        from cogs.bets import build_bet_embeds
+
+        embed = build_bet_embeds(units=[], note="lean", image_names=["slip1.png"])[0]
+        self.assertEqual(embed.fields, [])
 
     def test_multiple_slips_share_one_gallery_block(self):
         from cogs.bets import build_bet_embeds
 
         embeds = build_bet_embeds(
-            units="0.15u, 0.1u", image_names=["slip1.png", "slip2.jpg", "slip3.png"]
+            units=["0.15U", "0.1U"], image_names=["slip1.png", "slip2.jpg", "slip3.png"]
         )
 
         # Same URL on every embed is what makes Discord merge them into one block
@@ -456,26 +494,110 @@ class TestBetPost(unittest.TestCase):
             [e.image.url for e in embeds],
             ["attachment://slip1.png", "attachment://slip2.jpg", "attachment://slip3.png"],
         )
-        # Only the first carries the text
         self.assertEqual([e.fields for e in embeds[1:]], [[], []])
-
-    def test_link_button(self):
-        from cogs.bets import build_link_view, is_valid_link
-
-        self.assertFalse(is_valid_link("dk.com/slip"))
-        self.assertFalse(is_valid_link("https://x.com/" + "a" * 600))
-        self.assertIsNone(build_link_view(None, "DraftKings"))
-
-        view = build_link_view("https://sportsbook.draftkings.com/x", "DraftKings")
-        button = view.children[0]
-        self.assertEqual(button.label, "Bet this at DraftKings")
-        self.assertEqual(button.url, "https://sportsbook.draftkings.com/x")
 
     def test_slip_filenames(self):
         from cogs.bets import slip_filename
 
         self.assertEqual(slip_filename(1, "IMG_2231.JPG"), "slip1.jpg")
         self.assertEqual(slip_filename(2, "weird.heic"), "slip2.png")
+
+
+class FakeAttachment:
+    def __init__(self, filename="slip.png", content_type="image/png"):
+        self.filename, self.content_type = filename, content_type
+
+    async def read(self):
+        return b"\x89PNG\r\n\x1a\n"
+
+
+def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=None,
+                 content="<@999> 1u lock", fail_send=False):
+    """A message as the bets listener sees it. `log` records call order."""
+    import discord
+
+    log = []
+    bot_user = types.SimpleNamespace(id=999)
+
+    async def channel_send(**kw):
+        log.append(("send", kw))
+        if fail_send:
+            raise discord.Forbidden(types.SimpleNamespace(status=403, reason="x"), "nope")
+
+    async def reply(text, **kw):
+        log.append(("reply", text))
+
+    async def delete():
+        log.append(("delete", None))
+
+    async def dm(text):
+        log.append(("dm", text))
+
+    msg = types.SimpleNamespace(
+        author=types.SimpleNamespace(
+            id=author_id, bot=False, display_name="Runaans", send=dm,
+            display_avatar=types.SimpleNamespace(url="https://cdn/x.png")),
+        guild=types.SimpleNamespace(name="Runaans Locks", roles=roles or []),
+        mentions=[bot_user] if mention_bot else [],
+        attachments=[FakeAttachment()] if attachments is None else attachments,
+        content=content,
+        channel=types.SimpleNamespace(send=channel_send),
+        reply=reply,
+        delete=delete,
+    )
+    return msg, bot_user, log
+
+
+PREMIUM = types.SimpleNamespace(id=555, name="Premium", mention="<@&555>")
+
+
+class TestBetListener(unittest.IsolatedAsyncioTestCase):
+    def cog(self, bot_user):
+        from cogs.bets import BetsCog
+
+        return BetsCog(types.SimpleNamespace(user=bot_user))
+
+    async def test_posts_pings_premium_then_deletes_original(self):
+        msg, bot_user, log = fake_message(roles=[PREMIUM])
+        await self.cog(bot_user).on_message(msg)
+
+        self.assertEqual([name for name, _ in log], ["send", "delete"])
+        sent = log[0][1]
+        self.assertEqual(sent["content"], "<@&555>")
+        self.assertEqual(sent["allowed_mentions"].to_dict()["roles"], [555])
+        self.assertEqual([f.filename for f in sent["files"]], ["slip1.png"])
+        self.assertEqual(sent["embeds"][0].fields[0].value, "1U")
+
+    async def test_ignores_other_people_and_unmentioned_messages(self):
+        for kwargs in ({"author_id": 222}, {"mention_bot": False}):
+            msg, bot_user, log = fake_message(roles=[PREMIUM], **kwargs)
+            await self.cog(bot_user).on_message(msg)
+            self.assertEqual(log, [], kwargs)
+
+    async def test_no_screenshot_asks_for_one_and_keeps_message(self):
+        msg, bot_user, log = fake_message(roles=[PREMIUM], attachments=[])
+        await self.cog(bot_user).on_message(msg)
+        self.assertEqual([name for name, _ in log], ["reply"])
+
+    async def test_missing_role_posts_without_ping_and_dms_owner_once(self):
+        msg, bot_user, log = fake_message(roles=[])
+        cog = self.cog(bot_user)
+        await cog.on_message(msg)
+        await cog.on_message(msg)
+
+        sends = [kw for name, kw in log if name == "send"]
+        self.assertEqual(len(sends), 2)
+        self.assertIsNone(sends[0]["content"])
+        self.assertEqual(sends[0]["allowed_mentions"].to_dict().get("roles", []), [])
+        self.assertEqual(sum(1 for name, _ in log if name == "dm"), 1)
+
+    async def test_failed_post_keeps_original_message(self):
+        msg, bot_user, log = fake_message(roles=[PREMIUM], fail_send=True)
+        await self.cog(bot_user).on_message(msg)
+
+        names = [name for name, _ in log]
+        self.assertIn("reply", names)
+        self.assertNotIn("delete", names)
 
 
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
@@ -496,9 +618,9 @@ class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
                 await bot.load_extension(cog)
 
             names = {c.name for c in bot.tree.get_commands(guild=GUILD_ID)}
-            self.assertEqual(
-                names, {"recap", "sync", "stats", "bet"}
-            )
+            self.assertEqual(names, {"recap", "sync", "stats"})
+            # Bets are posted by mentioning the bot, not a slash command
+            self.assertIsNotNone(bot.get_cog("BetsCog"))
 
             # /recap must offer autocomplete on its date option
             recap_cmd = next(

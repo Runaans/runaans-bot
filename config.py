@@ -25,6 +25,9 @@ BRAND = os.getenv("BRAND", "Runaans Locks")
 # Where the brand title links to in /bet posts
 BRAND_URL = os.getenv("BRAND_URL", "https://runaanslocks.com")
 
+# Role that every bet post pings (matched by name, case-insensitive)
+PING_ROLE = os.getenv("PING_ROLE", "Premium")
+
 PURPLE = discord.Color.from_rgb(138, 43, 226)
 GREEN = discord.Color.from_rgb(0, 200, 100)
 RED = discord.Color.from_rgb(220, 50, 50)
