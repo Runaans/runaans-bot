@@ -80,10 +80,6 @@ SHEET_RETRIES = max(1, _get_int_env("SHEET_RETRIES", 3))
 PLAYBOOK_BOT_ID = _get_int_env("PLAYBOOK_BOT_ID", 1420761021483581440)
 PLAYBOOK_WAIT_SECONDS = max(0, _get_int_env("PLAYBOOK_WAIT_SECONDS", 30))
 
-# After a bet posts, read the slip with Claude and add a row to the sheet.
-# Needs ANTHROPIC_API_KEY in .env.
-SHEET_LOG_ENABLED = _get_bool_env("SHEET_LOG_ENABLED", True)
-
 # Background sheet -> MongoDB sync interval in minutes (0 disables it)
 AUTO_SYNC_MINUTES = _get_int_env("AUTO_SYNC_MINUTES", 15)
 

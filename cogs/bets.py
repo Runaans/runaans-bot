@@ -18,20 +18,9 @@ from config import (
     PING_ROLE,
     PLAYBOOK_BOT_ID,
     PLAYBOOK_WAIT_SECONDS,
-    SHEET_LOG_ENABLED,
 )
-import bet_logger
-from sheets_sync import sync_sheet
 
 log = logging.getLogger("runaans.bets")
-
-MEDIA_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
 
 # Discord allows 10 embeds per message, one screenshot each
 MAX_SLIPS = 10
@@ -107,44 +96,6 @@ def is_image(attachment: discord.Attachment) -> bool:
 def slip_filename(index: int, original: str) -> str:
     ext = os.path.splitext(original)[1].lower()
     return f"slip{index}{ext if ext in IMAGE_EXTENSIONS else '.png'}"
-
-
-def media_type_for(attachment: discord.Attachment) -> str:
-    ct = (attachment.content_type or "").split(";")[0].strip()
-    if ct in MEDIA_TYPES.values():
-        return ct
-    return MEDIA_TYPES.get(os.path.splitext(attachment.filename)[1].lower(), "image/png")
-
-
-class UndoLogView(discord.ui.View):
-    """One-tap undo on the DM that confirms what was logged to the sheet."""
-
-    def __init__(self, rows: list[int]):
-        super().__init__(timeout=24 * 3600)
-        self.rows = rows
-
-    @discord.ui.button(label="Undo", style=discord.ButtonStyle.danger)
-    async def undo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != OWNER_ID:
-            await interaction.response.send_message("Only the owner can undo this.", ephemeral=True)
-            return
-
-        try:
-            await asyncio.to_thread(bet_logger.clear_rows, self.rows)
-        except Exception:
-            log.exception("Undo failed for sheet rows %s", self.rows)
-            await interaction.response.send_message(
-                "Couldn't clear the rows - check the bot logs.", ephemeral=True
-            )
-            return
-
-        button.disabled = True
-        button.label = "Undone"
-        await interaction.response.edit_message(
-            content=f"↩️ Removed row(s) {', '.join(map(str, self.rows))} from the sheet.",
-            view=self,
-        )
-        self.stop()
 
 
 # Playbook's real betslip links live here; its "not available" message links
@@ -259,8 +210,6 @@ class BetsCog(commands.Cog):
         # added at startup so a tag on either counts
         self.playbook_ids = {PLAYBOOK_BOT_ID} if PLAYBOOK_BOT_ID else set()
         self._resolve_task = None
-        self._log_task = None
-        self.warned_no_claude_key = False
 
     async def cog_load(self):
         self._resolve_task = asyncio.create_task(self._resolve_playbook_ids())
@@ -398,13 +347,10 @@ class BetsCog(commands.Cog):
         # original message being deleted
         files = []
         names = []
-        payloads = []  # (bytes, media type) for reading the slips afterwards
         for i, attachment in enumerate(slips, start=1):
             name = slip_filename(i, attachment.filename)
-            data = await attachment.read()
-            files.append(discord.File(io.BytesIO(data), filename=name))
+            files.append(discord.File(io.BytesIO(await attachment.read()), filename=name))
             names.append(name)
-            payloads.append((data, media_type_for(attachment)))
 
         embeds = build_bet_embeds(
             units=parsed["units"],
@@ -459,65 +405,6 @@ class BetsCog(commands.Cog):
                 log.warning("Posted the bet but can't delete the original - missing Manage Messages")
             except discord.HTTPException:
                 log.warning("Posted the bet but couldn't delete a message", exc_info=True)
-
-        # Log the play to the sheet in the background so the post isn't delayed
-        if SHEET_LOG_ENABLED:
-            self._log_task = asyncio.create_task(
-                self._log_to_sheet(message.author, payloads, parsed)
-            )
-
-    async def _log_to_sheet(self, owner, payloads, parsed):
-        """Read each slip with Claude, append rows, DM the owner with Undo."""
-        if not bet_logger.available():
-            if not self.warned_no_claude_key:
-                self.warned_no_claude_key = True
-                await self._dm(owner, "To auto-log bets to the sheet, add `ANTHROPIC_API_KEY=...` "
-                                      "to the bot's .env and restart it.")
-            return
-
-        try:
-            reads = await asyncio.to_thread(bet_logger.read_slips, payloads)
-        except Exception:
-            log.exception("Couldn't read the bet slip(s)")
-            await self._dm(owner, "⚠️ I couldn't read that slip, so nothing was added to the "
-                                  "sheet - please log it by hand.")
-            return
-
-        stakes = bet_logger.pair_units(parsed["units"], len(reads))
-        note = " - ".join(x for x in (parsed.get("headline"), parsed.get("note")) if x)
-        rows = bet_logger.build_rows(reads, stakes, note, bet_logger.sheet_date())
-
-        if not rows:
-            await self._dm(owner, "⚠️ That screenshot didn't look like a bet slip, so nothing "
-                                  "was added to the sheet.")
-            return
-
-        try:
-            logged = await asyncio.to_thread(bet_logger.log_bets, rows)
-        except Exception:
-            log.exception("Couldn't write to the sheet")
-            await self._dm(owner, "⚠️ Read the slip but couldn't write to the sheet - please "
-                                  "log it by hand.")
-            return
-
-        lines = "\n".join(f"• {r.line()}" for r in logged)
-        await self._dm(
-            owner,
-            f"📝 Logged to the sheet (Win/Loss left blank until you grade it):\n{lines}",
-            view=UndoLogView([r.row for r in logged]),
-        )
-
-        # So /recap sees the new play right away instead of on the next auto-sync
-        try:
-            await asyncio.to_thread(sync_sheet)
-        except Exception:
-            log.warning("Sheet sync after logging failed", exc_info=True)
-
-    async def _dm(self, user, text, **kwargs):
-        try:
-            await user.send(text, **kwargs)
-        except discord.HTTPException:
-            log.warning("Couldn't DM the owner: %s", text[:80])
 
 
 async def setup(bot: commands.Bot):
