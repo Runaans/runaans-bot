@@ -32,6 +32,13 @@ UNITS_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*u(?:nits?)?\b", re.IGN
 MENTION_RE = re.compile(r"<@!?\d+>")
 MENTION_ID_RE = re.compile(r"<@!?(\d+)>")
 
+# A role ping and @everyone/@here. The post does its own @Premium ping, so one
+# typed into the trigger message is how the room was addressed rather than part
+# of the write-up. MENTION_RE above does not reach it - a role mention is
+# <@&id>, not <@id> - which is how the pill arrived inside the card, and, being
+# a short first line, as its quoted headline.
+PING_RE = re.compile(r"<@&\d+>|@everyone\b|@here\b")
+
 # The sportsbook name typed after @Playbook is for Playbook, not the note
 BOOK_WORDS = (
     r"draftkings|dk|fanduel|fd|bet365|365|betmgm|mgm|thescore|caesars|"
@@ -53,10 +60,13 @@ URL_RE = re.compile(r"https?://\S+")
 def parse_post(text: str, playbook_ids=()) -> dict:
     """Pull units out of a normal message and split it into headline + note.
 
-        @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
+        @Premium @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
         back from vacation, time to lock in
 
     -> units ["0.25U"], headline "FD 50% Boost Stimmy", note "back from ..."
+
+    Every ping goes: the bot's own mention, @Playbook, a role, @everyone. They
+    are how the message was addressed, and the card says what was written.
 
     `playbook_ids` are the Playbook bot user ids; the sportsbook word typed
     right after a Playbook mention is dropped along with the mention.
@@ -70,6 +80,7 @@ def parse_post(text: str, playbook_ids=()) -> dict:
             rf"<@!?{pid}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
         )
     text = MENTION_RE.sub("", text)
+    text = PING_RE.sub("", text)
 
     units = [f"{float(m.group(1)):g}U" for m in UNITS_RE.finditer(text)]
     text = UNITS_RE.sub("", text)
@@ -246,6 +257,25 @@ class BetsCog(commands.Cog):
         ids |= {int(i) for i in MENTION_ID_RE.findall(message.content or "")}
         return bool(ids & self.playbook_ids)
 
+    def _addressed(self, message: discord.Message) -> bool:
+        """True when the bot was named in the text. That is the trigger.
+
+        `message.mentions` answers a slightly different question: replying to
+        one of the bot's own posts with the ping left on puts the bot in that
+        list without @RunaansLocks having been typed anywhere.
+
+        The mention is also what makes the text readable at all without the
+        privileged message-content intent, so an empty content is text that
+        never arrived rather than a message that failed to name the bot - and
+        there the mention list is all there is to go on.
+        """
+        me = self.bot.user
+        if me is None or me not in message.mentions:
+            return False
+
+        content = message.content or ""
+        return not content or str(me.id) in MENTION_ID_RE.findall(content)
+
     def _ping_role(self, guild: discord.Guild) -> discord.Role | None:
         return discord.utils.find(
             lambda r: r.name.lower() == PING_ROLE.lower(), guild.roles
@@ -303,12 +333,10 @@ class BetsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Only the owner's messages, in a server, that mention the bot.
-        # (Mentioning the bot is also what makes message.content readable
-        # without the privileged message-content intent.)
+        # Only the owner's messages, in a server, that name the bot.
         if message.author.bot or message.guild is None:
             return
-        if message.author.id != OWNER_ID or self.bot.user not in message.mentions:
+        if message.author.id != OWNER_ID or not self._addressed(message):
             return
 
         slips = [a for a in message.attachments if is_image(a)][:MAX_SLIPS]

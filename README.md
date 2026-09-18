@@ -17,9 +17,11 @@ All commands are owner-only and reply privately unless they post to the recap ch
 Post like normal — paste or upload the slip screenshot(s), type the units and your note, and mention the bot along with @Playbook:
 
 ```
-@RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
+@Premium @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
 back from vacation, time to lock in
 ```
+
+Typing **@RunaansLocks** is the trigger, and pings are left out of the card — a role, @everyone, the bot itself, @Playbook — because the post does its own @Premium ping. Ping the room in the same breath if you like; only what you wrote reaches the block.
 
 The bot replaces your message with one clean block: a short first line becomes the quoted headline, the rest is the write-up, units go in their own field, and every screenshot is shown full-size, one under the other (up to 10). Every post pings **@Premium** (change the role with `PING_ROLE`). Only the owner's messages are picked up.
 

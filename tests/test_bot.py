@@ -452,6 +452,24 @@ class TestBetParsing(unittest.TestCase):
 
         self.assertEqual(parse_post("<@123>"), {"units": [], "headline": None, "note": None})
 
+    def test_a_role_ping_is_not_part_of_the_write_up(self):
+        from cogs.bets import parse_post
+
+        # The post does its own @Premium ping. One typed into the trigger
+        # message is how the room was addressed, and it used to arrive in the
+        # card as the quoted headline - a green pill sitting above the note.
+        parsed = parse_post("<@&555> <@999> 1u\nCash the +676 FD Play too")
+        self.assertEqual(
+            parsed,
+            {"units": ["1U"], "headline": None, "note": "Cash the +676 FD Play too"},
+        )
+
+    def test_everyone_and_here_are_pings_too(self):
+        from cogs.bets import parse_post
+
+        self.assertEqual(parse_post("<@999> @everyone 1u lock")["note"], "lock")
+        self.assertEqual(parse_post("<@999> @here 1u lock")["note"], "lock")
+
 
 class TestBetEmbeds(unittest.TestCase):
     def test_single_slip_block(self):
@@ -716,6 +734,20 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
             msg, bot, log = fake_message(roles=[PREMIUM], **kwargs)
             await self.cog(bot).on_message(msg)
             self.assertEqual(log, [], kwargs)
+
+    async def test_a_reply_ping_is_not_a_trigger(self):
+        # Replying to one of the bot's own posts with the ping left on puts the
+        # bot in message.mentions without @RunaansLocks having been typed.
+        msg, bot, log = fake_message(roles=[PREMIUM], content="1u another slip")
+        await self.cog(bot).on_message(msg)
+        self.assertEqual(log, [])
+
+    async def test_posts_when_the_text_never_arrived(self):
+        # Without the message-content intent an empty content is text the bot
+        # was never given, not a message that failed to name it.
+        msg, bot, log = fake_message(roles=[PREMIUM], content="")
+        await self.cog(bot).on_message(msg)
+        self.assertEqual([name for name, _ in log], ["send", "delete"])
 
     async def test_no_screenshot_asks_for_one_and_keeps_message(self):
         msg, bot, log = fake_message(roles=[PREMIUM], attachments=[])
