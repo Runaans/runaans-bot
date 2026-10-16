@@ -202,7 +202,7 @@ def build_recap_embed(data: dict) -> discord.Embed:
     )
 
     embed = discord.Embed(
-        title=f"RunaansLocks {pretty_date} Recap",
+        title=f"Runaans {pretty_date} Recap",
         color=PURPLE,
         timestamp=datetime.now(EASTERN),
     )

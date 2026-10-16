@@ -133,7 +133,7 @@ class TestRecapEmbed(unittest.TestCase):
         plays, totals = embed.fields[0].value, embed.fields[1].value
 
         # Original layout: plain title, two blank-named fields, purple bar
-        self.assertEqual(embed.title, "RunaansLocks 8/19/2026 Recap")
+        self.assertEqual(embed.title, "Runaans 8/19/2026 Recap")
         self.assertEqual([f.name for f in embed.fields], ["\u200b", "\u200b"])
         self.assertIsNone(embed.description)
         self.assertEqual(embed.footer.text, "Runaans Locks")
