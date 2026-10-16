@@ -803,6 +803,117 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("delete", names)
 
 
+def fake_multi_slip_post(answers_requests=True, slips=2):
+    """A post with several slips, and a Gambly that answers the post with one
+    combined link and - if `answers_requests` - each per-slip request with its
+    own. Gambly's answers are routed to whichever request their reply names."""
+    import asyncio
+
+    log = []
+    bot_user = types.SimpleNamespace(id=999)
+    sent_ids = iter(range(1001, 1100))
+
+    def answer(msg_id, reply_to, url):
+        async def delete():
+            log.append(("delete_answer", reply_to))
+
+        return types.SimpleNamespace(
+            id=msg_id,
+            author=types.SimpleNamespace(id=GAMBLY_ID, bot=True),
+            channel=types.SimpleNamespace(id=1),
+            reference=types.SimpleNamespace(message_id=reply_to),
+            components=[types.SimpleNamespace(children=[types.SimpleNamespace(label="x", url=url)])],
+            embeds=[], content=None, delete=delete,
+        )
+
+    pending = [answer(700, 123, "https://gambly.com/share-bet/combined")]
+    if answers_requests:
+        pending += [answer(700 + n, 1000 + n, f"https://gambly.com/share-bet/slip{n}")
+                    for n in reversed(range(1, slips + 1))]  # out of order: routed by reply
+    by_id = {a.id: a for a in pending}
+
+    async def channel_send(**kw):
+        msg_id = next(sent_ids)
+        log.append(("send", kw))
+
+        async def delete():
+            log.append(("delete_request", msg_id))
+
+        return types.SimpleNamespace(id=msg_id, delete=delete, channel=msg.channel)
+
+    async def fetch_message(message_id):
+        return by_id[message_id]
+
+    async def delete():
+        log.append(("delete", None))
+
+    msg = types.SimpleNamespace(
+        id=123,
+        author=types.SimpleNamespace(
+            id=111, bot=False, display_name="Runaans",
+            display_avatar=types.SimpleNamespace(url="https://cdn/x.png")),
+        guild=types.SimpleNamespace(name="Runaans Locks", roles=[PREMIUM]),
+        mentions=[bot_user, types.SimpleNamespace(id=GAMBLY_ID)],
+        attachments=[FakeAttachment(f"s{n}.png") for n in range(1, slips + 1)],
+        content="<@999> <@%d> 1u lock" % GAMBLY_ID,
+        channel=types.SimpleNamespace(id=1, send=channel_send, fetch_message=fetch_message),
+        delete=delete,
+    )
+
+    async def wait_for(event, *, check, timeout):
+        for candidate in pending:
+            if check(candidate):
+                pending.remove(candidate)
+                return candidate
+        raise asyncio.TimeoutError
+
+    return msg, types.SimpleNamespace(user=bot_user, wait_for=wait_for), log
+
+
+class TestGamblyPerSlip(unittest.IsolatedAsyncioTestCase):
+    def cog(self, bot):
+        from cogs.bets import BetsCog
+
+        return BetsCog(bot)
+
+    async def test_each_slip_gets_its_own_bet_button(self):
+        msg, bot, log = fake_multi_slip_post()
+        await self.cog(bot).on_message(msg)
+
+        sends = [kw for name, kw in log if name == "send"]
+        requests, post = sends[:-1], sends[-1]
+        # One request per slip, each tagging Gambly with that slip alone
+        self.assertEqual(len(requests), 2)
+        self.assertEqual([r["file"].filename for r in requests], ["slip1.png", "slip2.png"])
+        self.assertTrue(all(r["content"] == "<@%d>" % GAMBLY_ID for r in requests))
+
+        buttons = post["view"].children
+        self.assertEqual([b.label for b in buttons],
+                         ["Place this bet with Gambly \u2013 Bet 1", "Place this bet with Gambly \u2013 Bet 2"])
+        self.assertEqual([b.url for b in buttons],
+                         ["https://gambly.com/share-bet/slip1", "https://gambly.com/share-bet/slip2"])
+
+        # Everything but the clean post is cleaned up
+        names = [(name, arg) for name, arg in log if name.startswith("delete")]
+        self.assertIn(("delete", None), names)
+        self.assertEqual(sorted(a for n, a in names if n == "delete_request"), [1001, 1002])
+        self.assertEqual(sorted(a for n, a in names if n == "delete_answer"), [123, 1001, 1002])
+
+    async def test_a_gambly_that_ignores_bots_falls_back_to_the_combined_link_and_stops_asking(self):
+        msg, bot, log = fake_multi_slip_post(answers_requests=False)
+        cog = self.cog(bot)
+        await cog.on_message(msg)
+
+        post = [kw for name, kw in log if name == "send"][-1]
+        self.assertEqual([b.url for b in post["view"].children], ["https://gambly.com/share-bet/combined"])
+        self.assertFalse(cog.gambly_answers_bots)
+
+        msg, bot, log = fake_multi_slip_post(answers_requests=False)
+        cog.bot = bot
+        await cog.on_message(msg)
+        self.assertEqual(len([1 for name, _ in log if name == "send"]), 1)  # no requests this time
+
+
 class TestGamblyParsing(unittest.TestCase):
     def test_book_word_after_gambly_is_dropped(self):
         from cogs.bets import parse_post
