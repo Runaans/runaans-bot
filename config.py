@@ -74,11 +74,12 @@ SHEET_DATA_START_ROW = max(1, _get_int_env("SHEET_DATA_START_ROW", 12))
 # How many times to retry a rate-limited/transient Google Sheets read
 SHEET_RETRIES = max(1, _get_int_env("SHEET_RETRIES", 3))
 
-# Playbook AI's bot user. When a bet post also tags Playbook, the bot waits
-# for Playbook's reply, takes its betslip link, and deletes Playbook's card.
-# 0 disables the wait.
-PLAYBOOK_BOT_ID = _get_int_env("PLAYBOOK_BOT_ID", 1420761021483581440)
-PLAYBOOK_WAIT_SECONDS = max(0, _get_int_env("PLAYBOOK_WAIT_SECONDS", 30))
+# GamblyBot. When a bet post also tags Gambly, the bot waits for Gambly's
+# answer, puts its "Place this bet with Gambly" link on a button, and deletes
+# Gambly's card. The id is the application id in Gambly's install link. It
+# reads the slip image, so it gets a longer wait. 0 disables the wait.
+GAMBLY_BOT_ID = _get_int_env("GAMBLY_BOT_ID", 1338973806383071392)
+GAMBLY_WAIT_SECONDS = max(0, _get_int_env("GAMBLY_WAIT_SECONDS", 45))
 
 # Background sheet -> MongoDB sync interval in minutes (0 disables it)
 AUTO_SYNC_MINUTES = _get_int_env("AUTO_SYNC_MINUTES", 15)

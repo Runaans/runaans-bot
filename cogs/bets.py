@@ -16,8 +16,8 @@ from config import (
     PURPLE,
     EASTERN,
     PING_ROLE,
-    PLAYBOOK_BOT_ID,
-    PLAYBOOK_WAIT_SECONDS,
+    GAMBLY_BOT_ID,
+    GAMBLY_WAIT_SECONDS,
 )
 
 log = logging.getLogger("runaans.bets")
@@ -39,7 +39,7 @@ MENTION_ID_RE = re.compile(r"<@!?(\d+)>")
 # a short first line, as its quoted headline.
 PING_RE = re.compile(r"<@&\d+>|@everyone\b|@here\b")
 
-# The sportsbook name typed after @Playbook is for Playbook, not the note
+# A sportsbook name typed right after @Gambly is for Gambly, not the note
 BOOK_WORDS = (
     r"draftkings|dk|fanduel|fd|bet365|365|betmgm|mgm|thescore|caesars|"
     r"betrivers|fanatics|pointsbet|proline|espn\s*bet"
@@ -48,36 +48,32 @@ BOOK_WORDS = (
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
-# Playbook's button reads "Find your DraftKings betslip at Playbook"
-PLAYBOOK_LABEL_RE = re.compile(r"find your (.+?) betslip", re.IGNORECASE)
-
-# Playbook answers within a fraction of a second with a placeholder, then
-# edits the real betslip in a few seconds later. Re-fetch at this interval.
-PLAYBOOK_POLL_SECONDS = 1.5
-URL_RE = re.compile(r"https?://\S+")
+# Gambly reads the slip image, so it may answer with a placeholder and edit
+# the betslip in later. Re-fetch its reply at this interval.
+GAMBLY_POLL_SECONDS = 1.5
 
 
-def parse_post(text: str, playbook_ids=()) -> dict:
+def parse_post(text: str, gambly_ids=()) -> dict:
     """Pull units out of a normal message and split it into headline + note.
 
-        @Premium @RunaansLocks @Playbook Draftkings 0.25u FD 50% Boost Stimmy
+        @Premium @RunaansLocks @GamblyBot 0.25u FD 50% Boost Stimmy
         back from vacation, time to lock in
 
     -> units ["0.25U"], headline "FD 50% Boost Stimmy", note "back from ..."
 
-    Every ping goes: the bot's own mention, @Playbook, a role, @everyone. They
-    are how the message was addressed, and the card says what was written.
+    Every ping goes: the bot's own mention, @GamblyBot, a role, @everyone.
+    They are how the message was addressed, and the card says what was written.
 
-    `playbook_ids` are the Playbook bot user ids; the sportsbook word typed
-    right after a Playbook mention is dropped along with the mention.
+    `gambly_ids` are the Gambly bot user ids; a sportsbook word typed right
+    after a Gambly mention is dropped along with the mention.
     """
     text = text or ""
 
-    if isinstance(playbook_ids, int):
-        playbook_ids = [playbook_ids]
-    for pid in playbook_ids:
+    if isinstance(gambly_ids, int):
+        gambly_ids = [gambly_ids]
+    for gid in gambly_ids:
         text = re.sub(
-            rf"<@!?{pid}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
+            rf"<@!?{gid}>\s*(?:(?:{BOOK_WORDS})\b)?", "", text, flags=re.IGNORECASE
         )
     text = MENTION_RE.sub("", text)
     text = PING_RE.sub("", text)
@@ -109,43 +105,47 @@ def slip_filename(index: int, original: str) -> str:
     return f"slip{index}{ext if ext in IMAGE_EXTENSIONS else '.png'}"
 
 
-# Playbook's real betslip links live here; its "not available" message links
-# to playbookbot.com instead, which must not be mistaken for a betslip
-BETSLIP_URL_RE = re.compile(r"https://links\.playbook\.actionnetwork\.com/\S+")
+# Gambly's links point at its own site. Its install page lives there too, and
+# is not a betslip.
+GAMBLY_URL_RE = re.compile(r"https://(?:[\w-]+\.)*gambly\.com/(?!discord/)\S+", re.IGNORECASE)
+GAMBLY_LABEL = "Place this bet with Gambly"
 
-# How Playbook's reply reads when it couldn't match the bet
-PLAYBOOK_NO_MATCH_RE = re.compile(
+# How a reply reads when it couldn't match the bet
+NO_MATCH_RE = re.compile(
     r"not (?:yet )?available|couldn't find|could not find|no match|0 of \d+|unable to",
     re.IGNORECASE,
 )
 
 
 def extract_betslip(message) -> dict | None:
-    """Find the betslip link (and book name) in a Playbook reply.
+    """Find the betslip link in a Gambly reply.
 
-    Prefers the link button; falls back to a betslip URL in the embed text.
+    A link button on gambly.com first, then a gambly.com link in the embed or
+    message text. Any other link it carries - a sportsbook's own page, its
+    install page - is not what the button is for.
     """
     for row in getattr(message, "components", None) or []:
         for comp in getattr(row, "children", None) or []:
             url = getattr(comp, "url", None)
-            if url:
-                label = getattr(comp, "label", "") or ""
-                m = PLAYBOOK_LABEL_RE.search(label)
-                return {"url": url, "book": m.group(1) if m else None}
+            if url and GAMBLY_URL_RE.match(url):
+                return {"url": url, "label": GAMBLY_LABEL}
 
-    for embed in getattr(message, "embeds", None) or []:
-        m = BETSLIP_URL_RE.search(embed.description or "")
+    texts = [getattr(message, "content", None) or ""]
+    texts += [getattr(e, "description", None) or "" for e in getattr(message, "embeds", None) or []]
+    for text in texts:
+        m = GAMBLY_URL_RE.search(text)
         if m:
-            return {"url": m.group(0).rstrip(")>."), "book": None}
+            return {"url": m.group(0).rstrip(")>."), "label": GAMBLY_LABEL}
 
     return None
 
 
-def playbook_gave_up(message) -> str | None:
-    """The text of Playbook's reply if it says it couldn't match the bet."""
-    for embed in getattr(message, "embeds", None) or []:
-        text = embed.description or ""
-        if PLAYBOOK_NO_MATCH_RE.search(text):
+def gambly_gave_up(message) -> str | None:
+    """The text of Gambly's reply if it says it couldn't match the bet."""
+    texts = [getattr(message, "content", None) or ""]
+    texts += [getattr(e, "description", None) or "" for e in getattr(message, "embeds", None) or []]
+    for text in texts:
+        if NO_MATCH_RE.search(text):
             return text
 
     return None
@@ -204,10 +204,8 @@ def build_betslip_view(betslip: dict | None) -> discord.ui.View | None:
     if not betslip:
         return None
 
-    label = f"Place this bet at {betslip['book']}" if betslip.get("book") else "Place this bet"
-
     view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label=label[:80], url=betslip["url"]))
+    view.add_item(discord.ui.Button(label=betslip.get("label", GAMBLY_LABEL)[:80], url=betslip["url"]))
     return view
 
 
@@ -217,19 +215,19 @@ class BetsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.warned_missing_role = False
-        # Seeded from config; any other bot named "Playbook" in the server is
+        # Seeded from config; any other bot named "Gambly" in the server is
         # added at startup so a tag on either counts
-        self.playbook_ids = {PLAYBOOK_BOT_ID} if PLAYBOOK_BOT_ID else set()
+        self.gambly_ids = {GAMBLY_BOT_ID} if GAMBLY_BOT_ID else set()
         self._resolve_task = None
 
     async def cog_load(self):
-        self._resolve_task = asyncio.create_task(self._resolve_playbook_ids())
+        self._resolve_task = asyncio.create_task(self._resolve_gambly_ids())
 
     async def cog_unload(self):
         if self._resolve_task:
             self._resolve_task.cancel()
 
-    async def _resolve_playbook_ids(self):
+    async def _resolve_gambly_ids(self):
         try:
             await self.bot.wait_until_ready()
         except RuntimeError:
@@ -240,22 +238,22 @@ class BetsCog(commands.Cog):
                 "GET", "/guilds/{guild_id}/members/search", guild_id=guild.id
             )
             try:
-                found = await self.bot.http.request(route, params={"query": "playbook", "limit": 20})
+                found = await self.bot.http.request(route, params={"query": "gambly", "limit": 20})
             except discord.HTTPException:
-                log.warning("Couldn't search %s for Playbook bots", guild, exc_info=True)
+                log.warning("Couldn't search %s for Gambly bots", guild, exc_info=True)
                 continue
 
             for member in found:
                 user = member.get("user", {})
                 if user.get("bot"):
-                    self.playbook_ids.add(int(user["id"]))
+                    self.gambly_ids.add(int(user["id"]))
 
-        log.info("Playbook bot ids: %s", sorted(self.playbook_ids))
+        log.info("Gambly bot ids: %s", sorted(self.gambly_ids))
 
-    def _tagged_playbook(self, message: discord.Message) -> bool:
+    def _tagged_gambly(self, message: discord.Message) -> bool:
         ids = {u.id for u in message.mentions}
         ids |= {int(i) for i in MENTION_ID_RE.findall(message.content or "")}
-        return bool(ids & self.playbook_ids)
+        return bool(ids & self.gambly_ids)
 
     def _addressed(self, message: discord.Message) -> bool:
         """True when the bot was named in the text. That is the trigger.
@@ -281,55 +279,56 @@ class BetsCog(commands.Cog):
             lambda r: r.name.lower() == PING_ROLE.lower(), guild.roles
         )
 
-    async def _wait_for_playbook(self, original: discord.Message):
-        """Wait for Playbook's reply to `original`, then re-fetch it so its
+    async def _wait_for_gambly(self, original: discord.Message):
+        """Wait for Gambly's answer to `original`, then re-fetch it so its
         button/embed are populated (the live event omits them without the
-        message-content intent)."""
+        message-content intent).
 
-        def is_reply(m: discord.Message) -> bool:
-            return (
-                m.author.id in self.playbook_ids
-                and m.channel.id == original.channel.id
-                and m.reference is not None
-                and m.reference.message_id == original.id
-            )
+        Gambly may answer in the channel rather than as a reply, so a message
+        from it in the same channel that replies to nothing counts too. A
+        reply to some other message does not."""
+
+        def is_answer(m: discord.Message) -> bool:
+            if m.author.id not in self.gambly_ids or m.channel.id != original.channel.id:
+                return False
+            return m.reference is None or m.reference.message_id == original.id
 
         started = time.monotonic()
         try:
-            reply = await self.bot.wait_for("message", check=is_reply, timeout=PLAYBOOK_WAIT_SECONDS)
+            reply = await self.bot.wait_for("message", check=is_answer, timeout=GAMBLY_WAIT_SECONDS)
         except asyncio.TimeoutError:
-            log.warning("Playbook didn't reply within %ss - posting without a link", PLAYBOOK_WAIT_SECONDS)
+            log.warning("Gambly didn't reply within %ss - posting without a link", GAMBLY_WAIT_SECONDS)
             return None
 
-        log.info("Playbook replied after %.1fs", time.monotonic() - started)
+        log.info("Gambly replied after %.1fs", time.monotonic() - started)
 
-        # That first reply is usually a placeholder; keep re-fetching until
-        # the betslip link has been edited in, or the wait budget runs out
-        deadline = started + PLAYBOOK_WAIT_SECONDS
+        # The first reply may be a placeholder; keep re-fetching until the
+        # betslip link has been edited in, or the wait budget runs out
+        deadline = started + GAMBLY_WAIT_SECONDS
         latest = reply
         while True:
             try:
                 latest = await original.channel.fetch_message(reply.id)
             except discord.NotFound:
-                log.warning("Playbook removed its own reply")
+                log.warning("Gambly removed its own reply")
                 return None
             except discord.HTTPException:
-                log.warning("Couldn't re-fetch Playbook's reply", exc_info=True)
+                log.warning("Couldn't re-fetch Gambly's reply", exc_info=True)
 
             if extract_betslip(latest):
-                log.info("Playbook link ready after %.1fs", time.monotonic() - started)
+                log.info("Gambly link ready after %.1fs", time.monotonic() - started)
                 return latest
 
-            gave_up = playbook_gave_up(latest)
+            gave_up = gambly_gave_up(latest)
             if gave_up:
-                log.warning("Playbook couldn't match this bet, no link: %s", gave_up[:160])
+                log.warning("Gambly couldn't match this bet, no link: %s", gave_up[:160])
                 return latest
 
             if time.monotonic() >= deadline:
-                log.warning("Playbook never added a betslip link within %ss", PLAYBOOK_WAIT_SECONDS)
+                log.warning("Gambly never added a betslip link within %ss", GAMBLY_WAIT_SECONDS)
                 return latest
 
-            await asyncio.sleep(PLAYBOOK_POLL_SECONDS)
+            await asyncio.sleep(GAMBLY_POLL_SECONDS)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -348,28 +347,28 @@ class BetsCog(commands.Cog):
             )
             return
 
-        parsed = parse_post(message.content, self.playbook_ids)
+        parsed = parse_post(message.content, self.gambly_ids)
 
-        tagged = self._tagged_playbook(message)
+        tagged = self._tagged_gambly(message)
         log.info(
-            "Bet post from %s in #%s: %d slip(s), playbook tagged=%s, mentions=%s",
+            "Bet post from %s in #%s: %d slip(s), gambly tagged=%s, mentions=%s",
             message.author, message.channel, len(slips), tagged,
             [u.id for u in message.mentions],
         )
-        if not tagged and "playbook" in (message.content or "").lower():
+        if not tagged and "gambly" in (message.content or "").lower():
             log.warning(
-                "Message says 'playbook' but no Playbook bot was mentioned "
-                "(known Playbook ids: %s)", sorted(self.playbook_ids),
+                "Message says 'gambly' but no Gambly bot was mentioned "
+                "(known Gambly ids: %s)", sorted(self.gambly_ids),
             )
 
-        # If Playbook was tagged too, borrow its betslip link for the button
-        playbook_msg = None
-        if tagged and PLAYBOOK_WAIT_SECONDS:
-            playbook_msg = await self._wait_for_playbook(message)
+        # If Gambly was tagged too, borrow its betslip link for the button
+        gambly_msg = None
+        if tagged and GAMBLY_WAIT_SECONDS:
+            gambly_msg = await self._wait_for_gambly(message)
 
-        betslip = extract_betslip(playbook_msg) if playbook_msg else None
-        if playbook_msg is not None:
-            log.info("Playbook betslip link: %s", betslip["url"] if betslip else None)
+        betslip = extract_betslip(gambly_msg) if gambly_msg else None
+        if gambly_msg is not None:
+            log.info("Gambly betslip link: %s", betslip["url"] if betslip else None)
 
         # Re-upload the screenshots with the new post so they survive the
         # original message being deleted
@@ -423,8 +422,8 @@ class BetsCog(commands.Cog):
             )
             return
 
-        # The clean post replaces the original message and Playbook's card
-        for old in (message, playbook_msg):
+        # The clean post replaces the original message and Gambly's card
+        for old in (message, gambly_msg):
             if old is None:
                 continue
             try:

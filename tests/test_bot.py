@@ -532,53 +532,57 @@ class FakeAttachment:
         return b"\x89PNG\r\n\x1a\n"
 
 
-PLAYBOOK_ID = config.PLAYBOOK_BOT_ID
+GAMBLY_ID = config.GAMBLY_BOT_ID
+GAMBLY_URL = "https://gambly.com/betslip/k3Jd9"
 
 
-def fake_playbook_reply(original_id, log, url="https://links.playbook.actionnetwork.com/nSNdo",
-                        label="Find your DraftKings betslip at Playbook", description=None):
-    """Playbook AI's reply as fetched over REST, replying to the original.
+def fake_gambly_reply(original_id, log, url=GAMBLY_URL, label="Place this bet with Gambly",
+                      description=None, content=None, reply_to="original"):
+    """Gambly's answer as fetched over REST.
 
     With `url` it carries the link button; with url=None and a `description`
-    it's the placeholder or the "not available" message."""
+    it's a placeholder or the "couldn't match" message. `reply_to` is the
+    message it replies to: the original by default, None for an answer posted
+    in the channel without a reply, or another id."""
 
     async def delete():
-        log.append(("delete_playbook", None))
+        log.append(("delete_gambly", None))
 
     buttons = [types.SimpleNamespace(label=label, url=url)] if url else []
     embeds = [types.SimpleNamespace(description=description)] if description else []
+    target = original_id if reply_to == "original" else reply_to
 
     return types.SimpleNamespace(
         id=777,
-        author=types.SimpleNamespace(id=PLAYBOOK_ID, bot=True),
+        author=types.SimpleNamespace(id=GAMBLY_ID, bot=True),
         channel=types.SimpleNamespace(id=1),
-        reference=types.SimpleNamespace(message_id=original_id),
+        reference=None if target is None else types.SimpleNamespace(message_id=target),
         components=[types.SimpleNamespace(children=buttons)] if buttons else [],
         embeds=embeds,
+        content=content,
         delete=delete,
     )
 
 
-PLAYBOOK_NO_MATCH = ("Those selections are not yet available in our system. Stay tuned as we "
-                     "continue expanding. Learn more about Playbook [here](https://playbookbot.com).")
+GAMBLY_NO_MATCH = "Sorry, we couldn't find those selections at any sportsbook right now."
 
 
 def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=None,
-                 content="<@999> 1u lock", fail_send=False, mention_playbook=False,
-                 playbook=None):
+                 content="<@999> 1u lock", fail_send=False, mention_gambly=False,
+                 gambly=None):
     """A message as the bets listener sees it, plus a fake bot. `log` records
-    call order. `playbook` is Playbook's reply, or None for a timeout."""
+    call order. `gambly` is Gambly's answer, or None for a timeout."""
     import asyncio
     import discord
 
     log = []
     bot_user = types.SimpleNamespace(id=999)
 
-    # Playbook's reply records its deletion into this same log. A list means
-    # successive states of the reply: what wait_for sees, then each re-fetch.
-    if callable(playbook):
-        playbook = playbook(log)
-    states = list(playbook) if isinstance(playbook, list) else [playbook]
+    # Gambly's answer records its deletion into this same log. A list means
+    # successive states of the answer: what wait_for sees, then each re-fetch.
+    if callable(gambly):
+        gambly = gambly(log)
+    states = list(gambly) if isinstance(gambly, list) else [gambly]
 
     async def channel_send(**kw):
         log.append(("send", kw))
@@ -601,8 +605,8 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
         log.append(("dm", text))
 
     mentions = [bot_user] if mention_bot else []
-    if mention_playbook:
-        mentions.append(types.SimpleNamespace(id=PLAYBOOK_ID))
+    if mention_gambly:
+        mentions.append(types.SimpleNamespace(id=GAMBLY_ID))
 
     msg = types.SimpleNamespace(
         id=123,
@@ -622,7 +626,9 @@ def fake_message(*, author_id=111, mention_bot=True, attachments=None, roles=Non
         log.append(("wait", timeout))
         if states[0] is None:
             raise asyncio.TimeoutError
-        assert check(states[0]), "listener's check rejected Playbook's own reply"
+        if not check(states[0]):
+            log.append(("rejected", None))
+            raise asyncio.TimeoutError
         return states[0]
 
     bot = types.SimpleNamespace(user=bot_user, wait_for=wait_for)
@@ -638,85 +644,107 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
 
         return BetsCog(bot)
 
-    async def test_no_playbook_tag_means_no_waiting(self):
+    async def test_no_gambly_tag_means_no_waiting(self):
         msg, bot, log = fake_message(roles=[PREMIUM])
         await self.cog(bot).on_message(msg)
         self.assertNotIn("wait", [name for name, _ in log])
         self.assertNotIn("view", log[0][1])
 
-    async def test_playbook_link_becomes_button_and_its_card_is_deleted(self):
+    async def test_gambly_link_becomes_button_and_its_card_is_deleted(self):
         msg, bot, log = fake_message(
-            roles=[PREMIUM], mention_playbook=True,
-            content="<@999> <@%d> Draftkings 1u lock" % PLAYBOOK_ID,
-            playbook=lambda log: fake_playbook_reply(123, log),
+            roles=[PREMIUM], mention_gambly=True,
+            content="<@999> <@%d> Draftkings 1u lock" % GAMBLY_ID,
+            gambly=lambda log: fake_gambly_reply(123, log),
         )
         await self.cog(bot).on_message(msg)
 
         names = [name for name, _ in log]
-        self.assertEqual(names, ["wait", "fetch", "send", "delete", "delete_playbook"])
+        self.assertEqual(names, ["wait", "fetch", "send", "delete", "delete_gambly"])
         sent = log[2][1]
         button = sent["view"].children[0]
-        self.assertEqual(button.label, "Place this bet at DraftKings")
-        self.assertEqual(button.url, "https://links.playbook.actionnetwork.com/nSNdo")
-        # "Draftkings" was for Playbook, not the note
+        self.assertEqual(button.label, "Place this bet with Gambly")
+        self.assertEqual(button.url, GAMBLY_URL)
+        # "Draftkings" was for Gambly, not the note
         self.assertEqual(sent["embeds"][0].description, "lock")
 
-    async def test_playbook_timeout_posts_without_button(self):
-        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=None)
+    async def test_gambly_answering_in_the_channel_without_a_reply_counts(self):
+        msg, bot, log = fake_message(
+            roles=[PREMIUM], mention_gambly=True,
+            gambly=lambda log: fake_gambly_reply(123, log, reply_to=None),
+        )
+        await self.cog(bot).on_message(msg)
+
+        sent = next(kw for name, kw in log if name == "send")
+        self.assertEqual(sent["view"].children[0].url, GAMBLY_URL)
+        self.assertIn("delete_gambly", [name for name, _ in log])
+
+    async def test_a_gambly_reply_to_someone_else_is_not_taken(self):
+        msg, bot, log = fake_message(
+            roles=[PREMIUM], mention_gambly=True,
+            gambly=lambda log: fake_gambly_reply(123, log, reply_to=456),
+        )
+        await self.cog(bot).on_message(msg)
+
+        names = [name for name, _ in log]
+        self.assertIn("rejected", names)
+        self.assertNotIn("delete_gambly", names)  # someone else's card stays
+        self.assertNotIn("view", next(kw for name, kw in log if name == "send"))
+
+    async def test_gambly_timeout_posts_without_button(self):
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_gambly=True, gambly=None)
         await self.cog(bot).on_message(msg)
 
         names = [name for name, _ in log]
         self.assertEqual(names, ["wait", "send", "delete"])
         self.assertNotIn("view", log[1][1])
 
-    async def test_playbook_placeholder_is_polled_until_link_appears(self):
-        """Playbook replies instantly with a placeholder and edits the link in later."""
+    async def test_gambly_placeholder_is_polled_until_link_appears(self):
+        """Gambly may answer with a placeholder and edit the link in later."""
         from cogs import bets
 
         def states(log):
             return [
-                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
-                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
-                fake_playbook_reply(123, log),  # link edited in
+                fake_gambly_reply(123, log, url=None, description="Reading your slip..."),
+                fake_gambly_reply(123, log, url=None, description="Reading your slip..."),
+                fake_gambly_reply(123, log),  # link edited in
             ]
 
-        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=states)
-        original_poll = bets.PLAYBOOK_POLL_SECONDS
-        bets.PLAYBOOK_POLL_SECONDS = 0
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_gambly=True, gambly=states)
+        original_poll = bets.GAMBLY_POLL_SECONDS
+        bets.GAMBLY_POLL_SECONDS = 0
         try:
             await self.cog(bot).on_message(msg)
         finally:
-            bets.PLAYBOOK_POLL_SECONDS = original_poll
+            bets.GAMBLY_POLL_SECONDS = original_poll
 
         names = [name for name, _ in log]
         self.assertEqual(names.count("fetch"), 2)  # kept re-fetching until the link showed
-        self.assertEqual(names[-3:], ["send", "delete", "delete_playbook"])
+        self.assertEqual(names[-3:], ["send", "delete", "delete_gambly"])
         sent = next(kw for name, kw in log if name == "send")
-        self.assertEqual(sent["view"].children[0].url, "https://links.playbook.actionnetwork.com/nSNdo")
+        self.assertEqual(sent["view"].children[0].url, GAMBLY_URL)
 
-    async def test_playbook_giving_up_stops_polling_and_posts_without_button(self):
+    async def test_gambly_giving_up_stops_polling_and_posts_without_button(self):
         from cogs import bets
 
         def states(log):
             return [
-                fake_playbook_reply(123, log, url=None, description="Working on your betslip..."),
-                fake_playbook_reply(123, log, url=None, description=PLAYBOOK_NO_MATCH),
+                fake_gambly_reply(123, log, url=None, description="Reading your slip..."),
+                fake_gambly_reply(123, log, url=None, description=GAMBLY_NO_MATCH),
             ]
 
-        msg, bot, log = fake_message(roles=[PREMIUM], mention_playbook=True, playbook=states)
-        original_poll = bets.PLAYBOOK_POLL_SECONDS
-        bets.PLAYBOOK_POLL_SECONDS = 0
+        msg, bot, log = fake_message(roles=[PREMIUM], mention_gambly=True, gambly=states)
+        original_poll = bets.GAMBLY_POLL_SECONDS
+        bets.GAMBLY_POLL_SECONDS = 0
         try:
             await self.cog(bot).on_message(msg)
         finally:
-            bets.PLAYBOOK_POLL_SECONDS = original_poll
+            bets.GAMBLY_POLL_SECONDS = original_poll
 
         names = [name for name, _ in log]
-        self.assertEqual(names.count("fetch"), 1)  # gave up as soon as Playbook did
+        self.assertEqual(names.count("fetch"), 1)  # gave up as soon as Gambly did
         sent = next(kw for name, kw in log if name == "send")
         self.assertNotIn("view", sent)
-        self.assertIn("delete_playbook", names)  # its "not available" card is cleaned up too
-
+        self.assertIn("delete_gambly", names)  # its "couldn't match" card is cleaned up too
 
     async def test_posts_pings_premium_then_deletes_original(self):
         msg, bot, log = fake_message(roles=[PREMIUM])
@@ -775,50 +803,56 @@ class TestBetListener(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("delete", names)
 
 
-class TestPlaybookParsing(unittest.TestCase):
-    def test_book_word_after_playbook_is_dropped(self):
+class TestGamblyParsing(unittest.TestCase):
+    def test_book_word_after_gambly_is_dropped(self):
         from cogs.bets import parse_post
 
         for text in (
-            "<@999> <@%d> Draftkings 1u back from vacation" % PLAYBOOK_ID,
-            "<@999> 1u back from vacation <@!%d> dk" % PLAYBOOK_ID,
-            "<@999> 1u back from vacation <@%d>" % PLAYBOOK_ID,
+            "<@999> <@%d> Draftkings 1u back from vacation" % GAMBLY_ID,
+            "<@999> 1u back from vacation <@!%d> dk" % GAMBLY_ID,
+            "<@999> 1u back from vacation <@%d>" % GAMBLY_ID,
         ):
-            parsed = parse_post(text, PLAYBOOK_ID)
+            parsed = parse_post(text, GAMBLY_ID)
             self.assertEqual(parsed["note"], "back from vacation", text)
             self.assertEqual(parsed["units"], ["1U"])
 
     def test_book_words_elsewhere_are_kept(self):
         from cogs.bets import parse_post
 
-        parsed = parse_post("<@999> 1u bet365 is giving a 100%% boost <@%d> bet365" % PLAYBOOK_ID, PLAYBOOK_ID)
+        parsed = parse_post("<@999> 1u bet365 is giving a 100%% boost <@%d> bet365" % GAMBLY_ID, GAMBLY_ID)
         self.assertEqual(parsed["note"], "bet365 is giving a 100% boost")
 
-    def test_extract_betslip_prefers_button_then_embed_text(self):
+    def test_extract_betslip_prefers_a_gambly_button_then_text(self):
         from cogs.bets import extract_betslip
 
-        with_button = fake_playbook_reply(1, [], label="Find your bet365 betslip at Action")
-        self.assertEqual(extract_betslip(with_button),
-                         {"url": "https://links.playbook.actionnetwork.com/nSNdo", "book": "bet365"})
+        self.assertEqual(extract_betslip(fake_gambly_reply(1, [])),
+                         {"url": GAMBLY_URL, "label": "Place this bet with Gambly"})
 
         embed = types.SimpleNamespace(
-            description="We matched 1 of 1 markets! [Click here](https://links.playbook.actionnetwork.com/zQMgh)")
-        text_only = types.SimpleNamespace(components=[], embeds=[embed])
-        self.assertEqual(extract_betslip(text_only),
-                         {"url": "https://links.playbook.actionnetwork.com/zQMgh", "book": None})
+            description="Best price at FanDuel. [Open in Gambly](https://app.gambly.com/slip/zQMgh)")
+        text_only = types.SimpleNamespace(components=[], embeds=[embed], content=None)
+        self.assertEqual(extract_betslip(text_only)["url"], "https://app.gambly.com/slip/zQMgh")
 
         self.assertIsNone(extract_betslip(types.SimpleNamespace(components=[], embeds=[])))
 
-    def test_not_available_message_is_not_a_betslip_link(self):
-        from cogs.bets import extract_betslip, playbook_gave_up
+    def test_a_sportsbook_link_or_the_install_page_is_not_a_betslip(self):
+        from cogs.bets import extract_betslip
 
-        reply = fake_playbook_reply(1, [], url=None, description=PLAYBOOK_NO_MATCH)
-        # It links to playbookbot.com, which is not a betslip
+        sportsbook = fake_gambly_reply(1, [], url="https://sportsbook.fanduel.com/addToBetslip?x=1")
+        self.assertIsNone(extract_betslip(sportsbook))
+
+        install = fake_gambly_reply(1, [], url=None, content="Add me: https://gambly.com/discord/get-gambly-bot")
+        self.assertIsNone(extract_betslip(install))
+
+    def test_couldnt_match_message_is_giving_up(self):
+        from cogs.bets import extract_betslip, gambly_gave_up
+
+        reply = fake_gambly_reply(1, [], url=None, description=GAMBLY_NO_MATCH)
         self.assertIsNone(extract_betslip(reply))
-        self.assertTrue(playbook_gave_up(reply))
+        self.assertTrue(gambly_gave_up(reply))
 
-        placeholder = fake_playbook_reply(1, [], url=None, description="Working on your betslip...")
-        self.assertIsNone(playbook_gave_up(placeholder))
+        placeholder = fake_gambly_reply(1, [], url=None, description="Reading your slip...")
+        self.assertIsNone(gambly_gave_up(placeholder))
 
 
 class TestCogsLoad(unittest.IsolatedAsyncioTestCase):
