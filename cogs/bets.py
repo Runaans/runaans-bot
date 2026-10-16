@@ -117,6 +117,42 @@ NO_MATCH_RE = re.compile(
 )
 
 
+def extract_betslips(message) -> list[dict]:
+    """Every betslip link in a Gambly reply, in order.
+
+    Gambly's link buttons on gambly.com first; only if there are none, the
+    gambly.com links in its embeds or text. With more than one, each is
+    labelled 'Bet N' so the buttons say which bet they load."""
+    urls = []
+    for row in getattr(message, "components", None) or []:
+        for comp in getattr(row, "children", None) or []:
+            url = getattr(comp, "url", None)
+            if url and GAMBLY_URL_RE.match(url) and url not in urls:
+                urls.append(url)
+
+    if not urls:
+        texts = [getattr(message, "content", None) or ""]
+        texts += [getattr(e, "description", None) or "" for e in getattr(message, "embeds", None) or []]
+        for text in texts:
+            for m in GAMBLY_URL_RE.finditer(text):
+                url = m.group(0).rstrip(")>.")
+                if url not in urls:
+                    urls.append(url)
+
+    if len(urls) == 1:
+        return [{"url": urls[0], "label": GAMBLY_LABEL}]
+    return [{"url": url, "label": f"{GAMBLY_LABEL} \u2013 Bet {i}"} for i, url in enumerate(urls, start=1)]
+
+
+def gambly_buttons(message) -> list:
+    """What Gambly's reply actually carried, for the log."""
+    return [
+        (getattr(c, "label", None), getattr(c, "url", None))
+        for row in getattr(message, "components", None) or []
+        for c in getattr(row, "children", None) or []
+    ]
+
+
 def extract_betslip(message) -> dict | None:
     """Find the betslip link in a Gambly reply.
 
@@ -214,19 +250,6 @@ def build_betslip_view(betslips) -> discord.ui.View | None:
     return view
 
 
-def per_slip_betslips(answers) -> list[dict]:
-    """Gambly's answer for each slip, in slip order, as 'Bet N' buttons.
-
-    A slip Gambly couldn't match gets no button, and the others keep the
-    number of the slip they belong to rather than closing the gap."""
-    betslips = []
-    for i, answer in enumerate(answers, start=1):
-        betslip = extract_betslip(answer) if answer is not None else None
-        if betslip:
-            betslips.append({"url": betslip["url"], "label": f"{GAMBLY_LABEL} \u2013 Bet {i}"})
-    return betslips
-
-
 class BetsCog(commands.Cog):
     """Turns '@RunaansLocks 1u <note> + screenshot' into a clean bet post."""
 
@@ -237,11 +260,6 @@ class BetsCog(commands.Cog):
         # added at startup so a tag on either counts
         self.gambly_ids = {GAMBLY_BOT_ID} if GAMBLY_BOT_ID else set()
         self._resolve_task = None
-        # Gambly reads every screenshot in a message as one betslip. Asking it
-        # once per slip, from this bot, is how a post gets a button per bet -
-        # and if Gambly turns out to ignore messages from bots, that is
-        # remembered here so later posts don't wait for answers that never come.
-        self.gambly_answers_bots = True
 
     async def cog_load(self):
         self._resolve_task = asyncio.create_task(self._resolve_gambly_ids())
@@ -302,23 +320,19 @@ class BetsCog(commands.Cog):
             lambda r: r.name.lower() == PING_ROLE.lower(), guild.roles
         )
 
-    async def _wait_for_gambly(self, original: discord.Message, *, replies_only: bool = False):
+    async def _wait_for_gambly(self, original: discord.Message):
         """Wait for Gambly's answer to `original`, then re-fetch it so its
         button/embed are populated (the live event omits them without the
         message-content intent).
 
         Gambly may answer in the channel rather than as a reply, so a message
         from it in the same channel that replies to nothing counts too. A
-        reply to some other message does not. With `replies_only` - several
-        requests in flight at once - only a reply counts, because an answer
-        that replies to nothing can't say which request it belongs to."""
+        reply to some other message does not."""
 
         def is_answer(m: discord.Message) -> bool:
             if m.author.id not in self.gambly_ids or m.channel.id != original.channel.id:
                 return False
-            if m.reference is None:
-                return not replies_only
-            return m.reference.message_id == original.id
+            return m.reference is None or m.reference.message_id == original.id
 
         started = time.monotonic()
         try:
@@ -357,29 +371,6 @@ class BetsCog(commands.Cog):
 
             await asyncio.sleep(GAMBLY_POLL_SECONDS)
 
-    async def _ask_gambly_per_slip(self, message: discord.Message, slips) -> list:
-        """Post each slip on its own, tagging Gambly, and wait for each answer.
-
-        Returns (request, answer) per slip; either may be None."""
-        gambly_id = GAMBLY_BOT_ID or min(self.gambly_ids)
-
-        async def ask(i, attachment):
-            try:
-                data = await attachment.read()
-                request = await message.channel.send(
-                    content=f"<@{gambly_id}>",
-                    file=discord.File(io.BytesIO(data), filename=slip_filename(i, attachment.filename)),
-                    allowed_mentions=discord.AllowedMentions(
-                        everyone=False, roles=False, users=[discord.Object(id=gambly_id)]
-                    ),
-                )
-            except discord.HTTPException:
-                log.warning("Couldn't post slip %d for Gambly", i, exc_info=True)
-                return None, None
-            return request, await self._wait_for_gambly(request, replies_only=True)
-
-        return list(await asyncio.gather(*(ask(i, a) for i, a in enumerate(slips, start=1))))
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         # Only the owner's messages, in a server, that name the bot.
@@ -411,34 +402,15 @@ class BetsCog(commands.Cog):
                 "(known Gambly ids: %s)", sorted(self.gambly_ids),
             )
 
-        # If Gambly was tagged too, borrow its betslip link for the button.
-        # With several slips, each is also asked about on its own, so every
-        # bet gets a button; the combined answer is the fallback.
+        # If Gambly was tagged too, borrow its betslip link for the button
         gambly_msg = None
-        per_slip = []
-        betslips = []
         if tagged and GAMBLY_WAIT_SECONDS:
-            if len(slips) > 1 and self.gambly_answers_bots:
-                gambly_msg, per_slip = await asyncio.gather(
-                    self._wait_for_gambly(message),
-                    self._ask_gambly_per_slip(message, slips),
-                )
-            else:
-                gambly_msg = await self._wait_for_gambly(message)
+            gambly_msg = await self._wait_for_gambly(message)
 
-        if per_slip:
-            answers = [answer for _, answer in per_slip]
-            betslips = per_slip_betslips(answers)
-            log.info("Gambly per-slip links: %s", [b["url"] for b in betslips])
-            if all(a is None for a in answers) and gambly_msg is not None:
-                self.gambly_answers_bots = False
-                log.warning("Gambly answered the post but none of the per-slip requests - "
-                            "it seems to ignore bots, so posts get one combined link from now on")
-
-        if not betslips and gambly_msg is not None:
-            betslip = extract_betslip(gambly_msg)
-            log.info("Gambly betslip link: %s", betslip["url"] if betslip else None)
-            betslips = [betslip] if betslip else []
+        betslips = extract_betslips(gambly_msg) if gambly_msg else []
+        if gambly_msg is not None:
+            log.info("Gambly buttons: %s", gambly_buttons(gambly_msg))
+            log.info("Gambly betslip links: %s", [b["url"] for b in betslips])
 
         # Re-upload the screenshots with the new post so they survive the
         # original message being deleted
@@ -492,10 +464,8 @@ class BetsCog(commands.Cog):
             )
             return
 
-        # The clean post replaces the original message, Gambly's cards and
-        # the per-slip requests
-        leftovers = [m for pair in per_slip for m in pair]
-        for old in (message, gambly_msg, *leftovers):
+        # The clean post replaces the original message and Gambly's card
+        for old in (message, gambly_msg):
             if old is None:
                 continue
             try:

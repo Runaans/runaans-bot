@@ -27,8 +27,6 @@ The bot replaces your message with one clean block: a short first line becomes t
 
 If @GamblyBot is tagged too, the bot waits for Gambly's answer (up to `GAMBLY_WAIT_SECONDS`), puts its gambly.com link on a **Place this bet with Gambly** button under the block, and deletes Gambly's card along with your original. A sportsbook word typed right after @GamblyBot is left out of the note. If Gambly doesn't answer in time, or says it couldn't match the slip, the post goes up without the button.
 
-Gambly reads every screenshot in a message as one betslip, so with several slips the bot also posts each slip on its own, tagging @GamblyBot, and gives each bet its own **Place this bet with Gambly – Bet N** button. Those requests and Gambly's answers are deleted with your original. A slip Gambly can't match gets no button. If Gambly ignores the bot's requests, the post falls back to the one combined link, and the bot stops asking until it restarts.
-
 GamblyBot has to be in the server first — add it from <https://gambly.com/discord/get-gambly-bot> (its install link asks for Administrator).
 
 The bot needs Send Messages, Embed Links, Attach Files, and Manage Messages (to remove your original) in the channel, and the Premium role must be mentionable or the bot needs Mention Everyone.
