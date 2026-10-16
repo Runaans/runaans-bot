@@ -471,6 +471,33 @@ class TestBetParsing(unittest.TestCase):
         self.assertEqual(parse_post("<@999> @here 1u lock")["note"], "lock")
 
 
+class TestUnitsWithWords(unittest.TestCase):
+    def test_a_unit_that_says_what_it_is_on_keeps_its_words(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post(
+            "<@999> <@&555>\n"
+            "0.1u on the 3 leg parlay\n"
+            "0.1u on EACH RR Combo\n"
+            "(.4u total at risk)\n"
+            "Yes Herbert has been bad but there is value in his lines"
+        )
+        self.assertEqual(parsed["units"], [
+            "0.1U on the 3 leg parlay",
+            "0.1U on EACH RR Combo",
+            "(0.4U total at risk)",
+        ])
+        self.assertIsNone(parsed["headline"])
+        self.assertEqual(parsed["note"], "Yes Herbert has been bad but there is value in his lines")
+
+    def test_plain_amounts_still_read_as_before(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post("<@999> 1.15u 1.06u .25u\nlock it in")
+        self.assertEqual(parsed["units"], ["1.15U", "1.06U", "0.25U"])
+        self.assertEqual(parsed["note"], "lock it in")
+
+
 class TestBetEmbeds(unittest.TestCase):
     def test_single_slip_block(self):
         from cogs.bets import build_bet_embeds
@@ -855,6 +882,19 @@ class TestGamblyParsing(unittest.TestCase):
         self.assertEqual(extract_betslip(text_only)["url"], "https://app.gambly.com/slip/zQMgh")
 
         self.assertIsNone(extract_betslip(types.SimpleNamespace(components=[], embeds=[])))
+
+    def test_gamblys_open_in_a_book_button_is_not_a_second_bet(self):
+        from cogs.bets import extract_betslips
+
+        reply = types.SimpleNamespace(components=[types.SimpleNamespace(children=[
+            types.SimpleNamespace(label="View Your One-Click Betslip",
+                                  url="https://gambly.com/share-bet/AZUn?id=1"),
+            types.SimpleNamespace(label="Open in DraftKings",
+                                  url="https://gambly.com/deeplink/deeplink-cache-v2-x"),
+        ])], embeds=[], content=None)
+        self.assertEqual(extract_betslips(reply), [
+            {"url": "https://gambly.com/share-bet/AZUn?id=1", "label": "Place this bet with Gambly"},
+        ])
 
     def test_a_sportsbook_link_or_the_install_page_is_not_a_betslip(self):
         from cogs.bets import extract_betslip

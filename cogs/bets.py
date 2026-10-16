@@ -48,9 +48,23 @@ BOOK_WORDS = (
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
+# A unit amount that says what it is on - "0.1u on the 3 leg parlay", "0.1u on
+# EACH RR combo", "(0.4u total at risk)" - keeps its words in the Units field.
+# Without one of these the line is read as before: the amount goes to Units and
+# the rest is the headline or note ("0.25u FD 50% Boost Stimmy").
+UNIT_QUALIFIER_RE = re.compile(
+    r"\b(?:each|every|per|total|at risk|to win|parlay|parlays|rr|round robin|"
+    r"combo|combos|leg|legs|sgp|straight|straights|teaser|ladder|single|singles)\b",
+    re.IGNORECASE,
+)
+
 # Gambly reads the slip image, so it may answer with a placeholder and edit
 # the betslip in later. Re-fetch its reply at this interval.
 GAMBLY_POLL_SECONDS = 1.5
+
+
+def _unit(match) -> str:
+    return f"{float(match.group(1)):g}U"
 
 
 def parse_post(text: str, gambly_ids=()) -> dict:
@@ -78,10 +92,18 @@ def parse_post(text: str, gambly_ids=()) -> dict:
     text = MENTION_RE.sub("", text)
     text = PING_RE.sub("", text)
 
-    units = [f"{float(m.group(1)):g}U" for m in UNITS_RE.finditer(text)]
-    text = UNITS_RE.sub("", text)
+    units = []
+    lines = []
+    for line in text.splitlines():
+        amounts = list(UNITS_RE.finditer(line))
+        if len(amounts) == 1 and UNIT_QUALIFIER_RE.search(UNITS_RE.sub("", line)):
+            # The whole line is the unit, written out
+            units.append(re.sub(r"[ \t]+", " ", UNITS_RE.sub(_unit, line)).strip(" \t-–:|"))
+            continue
+        units += [_unit(m) for m in amounts]
+        lines.append(UNITS_RE.sub("", line))
 
-    lines = [re.sub(r"[ \t]+", " ", line).strip(" \t-–:|") for line in text.splitlines()]
+    lines = [re.sub(r"[ \t]+", " ", line).strip(" \t-–:|") for line in lines]
     lines = [line for line in lines if line]
 
     headline = note = None
@@ -106,8 +128,10 @@ def slip_filename(index: int, original: str) -> str:
 
 
 # Gambly's links point at its own site. Its install page lives there too, and
-# is not a betslip.
-GAMBLY_URL_RE = re.compile(r"https://(?:[\w-]+\.)*gambly\.com/(?!discord/)\S+", re.IGNORECASE)
+# is not a betslip - nor is its "Open in DraftKings" button, a gambly.com
+# /deeplink/ into one sportsbook, which a multi-button reply once turned into
+# a "Bet 2" that opened the same bets in DraftKings.
+GAMBLY_URL_RE = re.compile(r"https://(?:[\w-]+\.)*gambly\.com/(?!discord/|deeplink/)\S+", re.IGNORECASE)
 GAMBLY_LABEL = "Place this bet with Gambly"
 
 # How a reply reads when it couldn't match the bet
