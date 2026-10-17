@@ -511,6 +511,19 @@ class TestUnitsWithWords(unittest.TestCase):
         ])
         self.assertIsNone(parsed["note"])
 
+    def test_one_unit_to_a_line_needs_no_colon_on_the_last(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post(
+            "<@999> 0.2u on the 3/2/3 Combo:\n0.1u RR on the 4/3/4:\n.05u Parlay on the 4/3/4\nwrite-up"
+        )
+        self.assertEqual(parsed["units"], [
+            "0.2U on the 3/2/3 Combo",
+            "0.1U RR on the 4/3/4",
+            "0.05U Parlay on the 4/3/4",
+        ])
+        self.assertEqual(parsed["note"], "write-up")
+
     def test_without_a_colon_an_amount_is_just_an_amount(self):
         from cogs.bets import parse_post
 

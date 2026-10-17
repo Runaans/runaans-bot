@@ -53,8 +53,9 @@ HEADLINE_MAX = 60
 #     0.2u on the 3/2/3 Combo: 0.1u RR on the 4/3/4: 0.05u Parlay on the 4/3/4
 #
 # is three units, "0.2U on the 3/2/3 Combo", "0.1U RR on the 4/3/4" and
-# "0.05U Parlay on the 4/3/4". Once a colon follows the line's first amount,
-# every amount on it keeps the words after it, up to the next amount; the
+# "0.05U Parlay on the 4/3/4". Once a colon follows an amount anywhere in the
+# message, every amount keeps the words after it, up to the next amount or the
+# end of its line - so one unit to a line works too; the
 # colons only separate and are not shown. "0.2u: 3/2/3 RR Combo" works too.
 # Without a colon an amount is just an amount, and the rest of the line is the
 # headline or note ("0.25u FD 50% Boost Stimmy"). No keywords - only the colon.
@@ -68,13 +69,16 @@ def _unit(match) -> str:
     return f"{float(match.group(1)):g}U"
 
 
-def _units_in_line(line: str) -> tuple[str, list[str]]:
+def _colon_after_amount(line: str) -> bool:
+    first = UNITS_RE.search(line)
+    return bool(first) and ":" in line[first.end():]
+
+
+def _units_in_line(line: str, with_words: bool) -> tuple[str, list[str]]:
     """Split one line into (what is left for the note, its units)."""
     amounts = list(UNITS_RE.finditer(line))
     if not amounts:
         return line, []
-
-    with_words = ":" in line[amounts[0].end():]
 
     units = []
     rest = [line[:amounts[0].start()]]
@@ -116,10 +120,14 @@ def parse_post(text: str, gambly_ids=()) -> dict:
     text = MENTION_RE.sub("", text)
     text = PING_RE.sub("", text)
 
+    # One colon after an amount anywhere means every unit keeps its words, so
+    # units written one to a line need no colon on the last
+    with_words = any(_colon_after_amount(line) for line in text.splitlines())
+
     units = []
     lines = []
     for line in text.splitlines():
-        rest, line_units = _units_in_line(line)
+        rest, line_units = _units_in_line(line, with_words)
         units += line_units
         lines.append(rest)
 
