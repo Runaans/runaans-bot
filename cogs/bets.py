@@ -48,18 +48,14 @@ BOOK_WORDS = (
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
-# A unit amount that says what it is on keeps its words in the Units field:
-# "0.1u on the 3 leg parlay", "0.1u on EACH RR combo", "(0.4u total at risk)",
-# and several on one line - "0.2u on the first one, 0.1u RR on the boosted
-# one, 0.05u on parlay" is three units. The words run from the amount to the
-# next amount, the end of the line or the end of the sentence. An amount
-# followed by anything else is read as before: the amount goes to Units and the
-# rest is the headline or note ("0.25u FD 50% Boost Stimmy").
-UNIT_WORDS_RE = re.compile(
-    r"(?:on|each|every|per|for|total|at risk|to win|parlay|parlays|rr|round robin|"
-    r"combo|combos|leg|legs|sgp|straight|straights|teaser|ladder|single|singles)\b",
-    re.IGNORECASE,
-)
+# A colon straight after an amount gives it words in the Units field:
+# "0.2u: 3/2/3 RR Combo" is the unit "0.2U: 3/2/3 RR Combo". The words run to the
+# next amount or the end of the line, so several fit on one line. Without the
+# colon an amount is just an amount, and the rest of the line is the headline
+# or note ("0.25u FD 50% Boost Stimmy"). Guessing from words like "on" or
+# "parlay" put too much in Units and too little, so it is the colon, nothing
+# else.
+UNIT_COLON_RE = re.compile(r"\s*:")
 
 # Gambly reads the slip image, so it may answer with a placeholder and edit
 # the betslip in later. Re-fetch its reply at this interval.
@@ -73,37 +69,22 @@ def _unit(match) -> str:
 def _units_in_line(line: str) -> tuple[str, list[str]]:
     """Split one line into (what is left for the note, its units)."""
     amounts = list(UNITS_RE.finditer(line))
-    units = []
-    rest = []
-    pos = 0
-    for i, m in enumerate(amounts):
-        start = m.start()
-        # "(0.4u total at risk)" takes its bracket with it
-        before = line[pos:start].rstrip(" \t")
-        if before.endswith("("):
-            before, start = before[:-1], line.rindex("(", pos, start)
-        rest.append(before)
-
-        end = amounts[i + 1].start() if i + 1 < len(amounts) else len(line)
-        after = line[m.end():end]
-        words = after.strip(" \t")
-        if UNIT_WORDS_RE.match(words):
-            # The words up to the end of the sentence belong to the unit
-            stop = re.search(r"(?<!\d)[.!?](?!\d)|\s-\s|\s–\s", after)
-            cut = stop.start() + 1 if stop and after[stop.start()] in ".!?" else (stop.start() if stop else len(after))
-            unit = (line[start:m.start()] + _unit(m) + after[:cut]).strip(" \t,;")
-            if unit.startswith("(") and ")" not in unit and ")" in after[cut:cut + 2]:
-                unit += ")"
-                cut += after[cut:].index(")") + 1
-            units.append(re.sub(r"[ \t]+", " ", unit))
-            rest.append(after[cut:])
-        else:
-            units.append(_unit(m))
-            rest.append(after)
-        pos = end
-
     if not amounts:
         return line, []
+
+    units = []
+    rest = [line[:amounts[0].start()]]
+    for i, m in enumerate(amounts):
+        end = amounts[i + 1].start() if i + 1 < len(amounts) else len(line)
+        after = line[m.end():end]
+        colon = UNIT_COLON_RE.match(after)
+        words = after[colon.end():].strip(" \t,;") if colon else ""
+        if colon and words:
+            units.append(re.sub(r"[ \t]+", " ", f"{_unit(m)}: {words}"))
+        else:
+            units.append(_unit(m))
+            rest.append(after[colon.end():] if colon else after)
+
     return " ".join(r.strip(" \t,;") for r in rest if r.strip(" \t,;")), units
 
 

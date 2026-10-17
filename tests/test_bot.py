@@ -444,7 +444,7 @@ class TestBetParsing(unittest.TestCase):
     def test_units_written_as_words(self):
         from cogs.bets import parse_post
 
-        self.assertEqual(parse_post("2 units on this")["units"], ["2U on this"])
+        self.assertEqual(parse_post("2 units on this")["units"], ["2U"])
         self.assertEqual(parse_post(".5 u lean")["units"], ["0.5U"])
 
     def test_mention_only(self):
@@ -472,43 +472,39 @@ class TestBetParsing(unittest.TestCase):
 
 
 class TestUnitsWithWords(unittest.TestCase):
-    def test_a_unit_that_says_what_it_is_on_keeps_its_words(self):
+    def test_a_colon_after_the_amount_gives_it_words(self):
         from cogs.bets import parse_post
 
         parsed = parse_post(
             "<@999> <@&555>\n"
-            "0.1u on the 3 leg parlay\n"
-            "0.1u on EACH RR Combo\n"
-            "(.4u total at risk)\n"
+            "0.2u: 3/2/3 RR Combo\n"
+            "0.1U : on EACH RR combo\n"
             "Yes Herbert has been bad but there is value in his lines"
         )
-        self.assertEqual(parsed["units"], [
-            "0.1U on the 3 leg parlay",
-            "0.1U on EACH RR Combo",
-            "(0.4U total at risk)",
-        ])
+        self.assertEqual(parsed["units"], ["0.2U: 3/2/3 RR Combo", "0.1U: on EACH RR combo"])
         self.assertIsNone(parsed["headline"])
         self.assertEqual(parsed["note"], "Yes Herbert has been bad but there is value in his lines")
 
-    def test_several_units_with_words_on_one_line(self):
+    def test_several_on_one_line(self):
         from cogs.bets import parse_post
 
         parsed = parse_post(
-            "<@999> 0.2u on the First One, 0.1u RR on the Boosted One, 0.05u on Parlay"
+            "<@999> 0.2u: the 3/2/3 RR Combo, 0.1u: the 4/3/4 RR, .05u: the 4/3/4 Parlay"
         )
         self.assertEqual(parsed["units"], [
-            "0.2U on the First One",
-            "0.1U RR on the Boosted One",
-            "0.05U on Parlay",
+            "0.2U: the 3/2/3 RR Combo",
+            "0.1U: the 4/3/4 RR",
+            "0.05U: the 4/3/4 Parlay",
         ])
         self.assertIsNone(parsed["note"])
 
-    def test_the_words_stop_at_the_end_of_the_sentence(self):
+    def test_without_a_colon_an_amount_is_just_an_amount(self):
         from cogs.bets import parse_post
 
-        parsed = parse_post("<@999> 1u on Najee. Love the matchup")
-        self.assertEqual(parsed["units"], ["1U on Najee."])
-        self.assertEqual(parsed["note"], "Love the matchup")
+        parsed = parse_post("<@999> 0.25u on the parlay\nlove it")
+        self.assertEqual(parsed["units"], ["0.25U"])
+        self.assertEqual(parsed["headline"], "on the parlay")
+        self.assertEqual(parsed["note"], "love it")
 
     def test_plain_amounts_still_read_as_before(self):
         from cogs.bets import parse_post
