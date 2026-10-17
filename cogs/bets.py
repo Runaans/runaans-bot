@@ -48,14 +48,16 @@ BOOK_WORDS = (
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
-# A colon straight after an amount gives it words in the Units field:
-# "0.2u: 3/2/3 RR Combo" is the unit "0.2U 3/2/3 RR Combo" - the colon marks the
-# words and is not shown. The words run to the next amount or the end of the line, so several fit on one line. Without the
-# colon an amount is just an amount, and the rest of the line is the headline
-# or note ("0.25u FD 50% Boost Stimmy"). Guessing from words like "on" or
-# "parlay" put too much in Units and too little, so it is the colon, nothing
-# else.
-UNIT_COLON_RE = re.compile(r"\s*:")
+# A colon on a units line says the words belong to the units:
+#
+#     0.2u on the 3/2/3 Combo: 0.1u RR on the 4/3/4: 0.05u Parlay on the 4/3/4
+#
+# is three units, "0.2U on the 3/2/3 Combo", "0.1U RR on the 4/3/4" and
+# "0.05U Parlay on the 4/3/4". Once a colon follows the line's first amount,
+# every amount on it keeps the words after it, up to the next amount; the
+# colons only separate and are not shown. "0.2u: 3/2/3 RR Combo" works too.
+# Without a colon an amount is just an amount, and the rest of the line is the
+# headline or note ("0.25u FD 50% Boost Stimmy"). No keywords - only the colon.
 
 # Gambly reads the slip image, so it may answer with a placeholder and edit
 # the betslip in later. Re-fetch its reply at this interval.
@@ -72,18 +74,19 @@ def _units_in_line(line: str) -> tuple[str, list[str]]:
     if not amounts:
         return line, []
 
+    with_words = ":" in line[amounts[0].end():]
+
     units = []
     rest = [line[:amounts[0].start()]]
     for i, m in enumerate(amounts):
         end = amounts[i + 1].start() if i + 1 < len(amounts) else len(line)
         after = line[m.end():end]
-        colon = UNIT_COLON_RE.match(after)
-        words = after[colon.end():].strip(" \t,;") if colon else ""
-        if colon and words:
+        words = after.replace(":", " ").strip(" \t,;") if with_words else ""
+        if words:
             units.append(re.sub(r"[ \t]+", " ", f"{_unit(m)} {words}"))
         else:
             units.append(_unit(m))
-            rest.append(after[colon.end():] if colon else after)
+            rest.append(after)
 
     return " ".join(r.strip(" \t,;") for r in rest if r.strip(" \t,;")), units
 
