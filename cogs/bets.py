@@ -48,12 +48,15 @@ BOOK_WORDS = (
 # A short first line followed by more text is shown as the quoted headline
 HEADLINE_MAX = 60
 
-# A unit amount that says what it is on - "0.1u on the 3 leg parlay", "0.1u on
-# EACH RR combo", "(0.4u total at risk)" - keeps its words in the Units field.
-# Without one of these the line is read as before: the amount goes to Units and
-# the rest is the headline or note ("0.25u FD 50% Boost Stimmy").
-UNIT_QUALIFIER_RE = re.compile(
-    r"\b(?:each|every|per|total|at risk|to win|parlay|parlays|rr|round robin|"
+# A unit amount that says what it is on keeps its words in the Units field:
+# "0.1u on the 3 leg parlay", "0.1u on EACH RR combo", "(0.4u total at risk)",
+# and several on one line - "0.2u on the first one, 0.1u RR on the boosted
+# one, 0.05u on parlay" is three units. The words run from the amount to the
+# next amount, the end of the line or the end of the sentence. An amount
+# followed by anything else is read as before: the amount goes to Units and the
+# rest is the headline or note ("0.25u FD 50% Boost Stimmy").
+UNIT_WORDS_RE = re.compile(
+    r"(?:on|each|every|per|for|total|at risk|to win|parlay|parlays|rr|round robin|"
     r"combo|combos|leg|legs|sgp|straight|straights|teaser|ladder|single|singles)\b",
     re.IGNORECASE,
 )
@@ -65,6 +68,43 @@ GAMBLY_POLL_SECONDS = 1.5
 
 def _unit(match) -> str:
     return f"{float(match.group(1)):g}U"
+
+
+def _units_in_line(line: str) -> tuple[str, list[str]]:
+    """Split one line into (what is left for the note, its units)."""
+    amounts = list(UNITS_RE.finditer(line))
+    units = []
+    rest = []
+    pos = 0
+    for i, m in enumerate(amounts):
+        start = m.start()
+        # "(0.4u total at risk)" takes its bracket with it
+        before = line[pos:start].rstrip(" \t")
+        if before.endswith("("):
+            before, start = before[:-1], line.rindex("(", pos, start)
+        rest.append(before)
+
+        end = amounts[i + 1].start() if i + 1 < len(amounts) else len(line)
+        after = line[m.end():end]
+        words = after.strip(" \t")
+        if UNIT_WORDS_RE.match(words):
+            # The words up to the end of the sentence belong to the unit
+            stop = re.search(r"(?<!\d)[.!?](?!\d)|\s-\s|\s–\s", after)
+            cut = stop.start() + 1 if stop and after[stop.start()] in ".!?" else (stop.start() if stop else len(after))
+            unit = (line[start:m.start()] + _unit(m) + after[:cut]).strip(" \t,;")
+            if unit.startswith("(") and ")" not in unit and ")" in after[cut:cut + 2]:
+                unit += ")"
+                cut += after[cut:].index(")") + 1
+            units.append(re.sub(r"[ \t]+", " ", unit))
+            rest.append(after[cut:])
+        else:
+            units.append(_unit(m))
+            rest.append(after)
+        pos = end
+
+    if not amounts:
+        return line, []
+    return " ".join(r.strip(" \t,;") for r in rest if r.strip(" \t,;")), units
 
 
 def parse_post(text: str, gambly_ids=()) -> dict:
@@ -95,13 +135,9 @@ def parse_post(text: str, gambly_ids=()) -> dict:
     units = []
     lines = []
     for line in text.splitlines():
-        amounts = list(UNITS_RE.finditer(line))
-        if len(amounts) == 1 and UNIT_QUALIFIER_RE.search(UNITS_RE.sub("", line)):
-            # The whole line is the unit, written out
-            units.append(re.sub(r"[ \t]+", " ", UNITS_RE.sub(_unit, line)).strip(" \t-–:|"))
-            continue
-        units += [_unit(m) for m in amounts]
-        lines.append(UNITS_RE.sub("", line))
+        rest, line_units = _units_in_line(line)
+        units += line_units
+        lines.append(rest)
 
     lines = [re.sub(r"[ \t]+", " ", line).strip(" \t-–:|") for line in lines]
     lines = [line for line in lines if line]

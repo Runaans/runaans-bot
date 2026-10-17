@@ -444,7 +444,7 @@ class TestBetParsing(unittest.TestCase):
     def test_units_written_as_words(self):
         from cogs.bets import parse_post
 
-        self.assertEqual(parse_post("2 units on this")["units"], ["2U"])
+        self.assertEqual(parse_post("2 units on this")["units"], ["2U on this"])
         self.assertEqual(parse_post(".5 u lean")["units"], ["0.5U"])
 
     def test_mention_only(self):
@@ -489,6 +489,26 @@ class TestUnitsWithWords(unittest.TestCase):
         ])
         self.assertIsNone(parsed["headline"])
         self.assertEqual(parsed["note"], "Yes Herbert has been bad but there is value in his lines")
+
+    def test_several_units_with_words_on_one_line(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post(
+            "<@999> 0.2u on the First One, 0.1u RR on the Boosted One, 0.05u on Parlay"
+        )
+        self.assertEqual(parsed["units"], [
+            "0.2U on the First One",
+            "0.1U RR on the Boosted One",
+            "0.05U on Parlay",
+        ])
+        self.assertIsNone(parsed["note"])
+
+    def test_the_words_stop_at_the_end_of_the_sentence(self):
+        from cogs.bets import parse_post
+
+        parsed = parse_post("<@999> 1u on Najee. Love the matchup")
+        self.assertEqual(parsed["units"], ["1U on Najee."])
+        self.assertEqual(parsed["note"], "Love the matchup")
 
     def test_plain_amounts_still_read_as_before(self):
         from cogs.bets import parse_post
