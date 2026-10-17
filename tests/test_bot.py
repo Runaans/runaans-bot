@@ -481,7 +481,7 @@ class TestUnitsWithWords(unittest.TestCase):
             "0.1U : on EACH RR combo\n"
             "Yes Herbert has been bad but there is value in his lines"
         )
-        self.assertEqual(parsed["units"], ["0.2U: 3/2/3 RR Combo", "0.1U: on EACH RR combo"])
+        self.assertEqual(parsed["units"], ["0.2U 3/2/3 RR Combo", "0.1U on EACH RR combo"])
         self.assertIsNone(parsed["headline"])
         self.assertEqual(parsed["note"], "Yes Herbert has been bad but there is value in his lines")
 
@@ -492,9 +492,9 @@ class TestUnitsWithWords(unittest.TestCase):
             "<@999> 0.2u: the 3/2/3 RR Combo, 0.1u: the 4/3/4 RR, .05u: the 4/3/4 Parlay"
         )
         self.assertEqual(parsed["units"], [
-            "0.2U: the 3/2/3 RR Combo",
-            "0.1U: the 4/3/4 RR",
-            "0.05U: the 4/3/4 Parlay",
+            "0.2U the 3/2/3 RR Combo",
+            "0.1U the 4/3/4 RR",
+            "0.05U the 4/3/4 Parlay",
         ])
         self.assertIsNone(parsed["note"])
 

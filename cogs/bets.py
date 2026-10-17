@@ -49,8 +49,8 @@ BOOK_WORDS = (
 HEADLINE_MAX = 60
 
 # A colon straight after an amount gives it words in the Units field:
-# "0.2u: 3/2/3 RR Combo" is the unit "0.2U: 3/2/3 RR Combo". The words run to the
-# next amount or the end of the line, so several fit on one line. Without the
+# "0.2u: 3/2/3 RR Combo" is the unit "0.2U 3/2/3 RR Combo" - the colon marks the
+# words and is not shown. The words run to the next amount or the end of the line, so several fit on one line. Without the
 # colon an amount is just an amount, and the rest of the line is the headline
 # or note ("0.25u FD 50% Boost Stimmy"). Guessing from words like "on" or
 # "parlay" put too much in Units and too little, so it is the colon, nothing
@@ -80,7 +80,7 @@ def _units_in_line(line: str) -> tuple[str, list[str]]:
         colon = UNIT_COLON_RE.match(after)
         words = after[colon.end():].strip(" \t,;") if colon else ""
         if colon and words:
-            units.append(re.sub(r"[ \t]+", " ", f"{_unit(m)}: {words}"))
+            units.append(re.sub(r"[ \t]+", " ", f"{_unit(m)} {words}"))
         else:
             units.append(_unit(m))
             rest.append(after[colon.end():] if colon else after)
